@@ -11,6 +11,7 @@
     "windows": [
       {
         "title": "Chesslens",
+        "visible": false,
         "width": 1320,
         "height": 880,
         "minWidth": 940,

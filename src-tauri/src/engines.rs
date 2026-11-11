@@ -196,6 +196,21 @@ pub fn probe_uci(path: &Path) -> Result<String, String> {
     }))
 }
 
+/// Tag of the newest release of a GitHub repository.
+fn latest_tag(repo: &str, user_agent: &str) -> Result<String, String> {
+    let api = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let body = ureq::get(&api)
+        .timeout(Duration::from_secs(20))
+        .set("User-Agent", user_agent)
+        .set("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_string()
+        .map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    Ok(v["tag_name"].as_str().unwrap_or("").to_string())
+}
+
 pub struct Registry {
     dir: PathBuf,
 }
@@ -259,6 +274,26 @@ impl Registry {
             source: "imported".into(),
             version: String::new(),
         })
+    }
+
+    /// Downloaded engines for which GitHub has a newer release: (engine id, newest tag).
+    pub fn updates(&self, user_agent: &str) -> Result<Vec<(String, String)>, String> {
+        let cat = catalog();
+        let mut out = Vec::new();
+        let (mut asked, mut failed) = (0, 0);
+        for e in self.list()?.into_iter().filter(|e| e.source == "downloaded") {
+            let Some(entry) = cat.iter().find(|c| c.id == e.id) else { continue };
+            asked += 1;
+            match latest_tag(entry.repo, user_agent) {
+                Ok(tag) if !tag.is_empty() && tag != e.version => out.push((e.id, tag)),
+                Ok(_) => {}
+                Err(_) => failed += 1,
+            }
+        }
+        if asked > 0 && failed == asked {
+            return Err("Could not reach GitHub to check for updates.".into());
+        }
+        Ok(out)
     }
 
     pub fn remove(&self, id: &str) -> Result<(), String> {

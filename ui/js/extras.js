@@ -81,6 +81,12 @@ export function parseClock(comment) {
   return h ? `${h}:${String(min).padStart(2, '0')}:${ss}` : `${min}:${ss}`;
 }
 
+/** Seconds left on the clock from a "[%clk h:mm:ss]" comment, or null. */
+export function clockSeconds(comment) {
+  const m = /\[%clk\s+(\d+):(\d+):(\d+(?:\.\d+)?)\]/.exec(comment || '');
+  return m ? +m[1] * 3600 + +m[2] * 60 + +m[3] : null;
+}
+
 // ---------------------------------------------------------------- rating estimate
 const CURVE = [[20, 100], [50, 500], [60, 800], [70, 1100], [75, 1300], [80, 1500], [85, 1800], [90, 2100], [93, 2300], [96, 2600], [98, 2850], [100, 3200]];
 /** Very rough playing strength for one game from its accuracy. Not chess.com's formula. */

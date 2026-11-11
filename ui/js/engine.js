@@ -41,7 +41,7 @@ function parseInfo(line) {
         i += 2;
         break;
       case 'lowerbound': case 'upperbound': info.bound = true; break;
-      case 'pv': info.pv = t.slice(i + 1); i = t.length; break;
+      case 'pv': info.pv = t.slice(i + 1).filter(Boolean); i = t.length; break;
     }
   }
   return info;
@@ -89,7 +89,8 @@ export class Engine {
       if (o) this.options.push(o);
     } else if (line.startsWith('info ') && this.job) {
       const info = parseInfo(line);
-      if (info.pv && !info.bound && (info.cp !== undefined || info.mate !== undefined)) {
+      // A search stopped at once can report a score with an empty line; that is not usable.
+      if (info.pv && info.pv[0] && !info.bound && (info.cp !== undefined || info.mate !== undefined)) {
         const sign = this.job.sign;
         const entry = {
           depth: info.depth,

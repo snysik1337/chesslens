@@ -20,12 +20,14 @@
     </div>
   </section>
 
+  <div class="splitter" id="splitter" title="Drag to resize"></div>
   <section class="panel">
     <nav class="tabs" id="tabs">
       <button data-tab="analysis" class="active">Analysis</button>
       <button data-tab="review">Review</button>
       <button data-tab="games">Games</button>
-      <button data-tab="play">Play</button>
+      <button data-tab="play">Train</button>
+      <button data-tab="insights">Insights</button>
       <button data-tab="engines">Engines</button>
       <button data-tab="settings">Settings</button>
     </nav>
@@ -36,6 +38,7 @@
           <input type="checkbox" id="engine-on" checked><span></span>
         </label>
         <select id="engine-select" title="Active engine"></select>
+        <button class="chipbtn" id="threat-toggle" title="Show what the opponent is threatening">Threats</button>
         <span class="engine-depth" id="engine-depth"></span>
       </div>
       <div class="no-engine" id="no-engine" hidden>
@@ -144,12 +147,51 @@
       </div>
       <div class="row"><button class="btn primary big" id="play-start">Start game</button></div>
       <p class="status" id="play-note"></p>
+      <h3>Opening repertoire</h3>
+      <p class="hint">Save the lines you want to know by heart, then get quizzed: the app plays the other side and checks your moves.</p>
+      <div class="row">
+        <button class="btn" id="rep-add">Add the line on the board</button>
+        <button class="btn primary" id="rep-train">Train all</button>
+        <button class="btn" id="rep-train-w">White lines</button>
+        <button class="btn" id="rep-train-b">Black lines</button>
+      </div>
+      <div class="game-list" id="rep-list"></div>
+    </div>
+
+    <div class="tab-body" id="tab-insights" hidden>
+      <h3>Insights across your games</h3>
+      <p class="hint">Reviews a batch of games in the background and shows patterns in your play. Results are kept, so games are only analysed once.</p>
+      <div class="form">
+        <label>Games from
+          <select id="ins-source">
+            <option value="fetched">Games tab list (by username)</option>
+            <option value="library">Library</option>
+          </select>
+        </label>
+        <label>How many
+          <select id="ins-count"><option>10</option><option selected>20</option><option>40</option><option value="999">All</option></select>
+        </label>
+        <label>Depth
+          <select id="ins-depth"><option value="10">Quick (10)</option><option value="12" selected>Normal (12)</option><option value="14">Careful (14)</option></select>
+        </label>
+        <label>Player
+          <input type="text" id="ins-player" placeholder="detected automatically" spellcheck="false">
+        </label>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="ins-run">Analyse games</button>
+        <button class="btn" id="ins-cancel" hidden>Cancel</button>
+        <button class="btn" id="ins-clear">Forget stored results</button>
+      </div>
+      <div class="progress" id="ins-progress" hidden><div></div><span></span></div>
+      <p class="status" id="ins-status"></p>
+      <div id="ins-result"></div>
     </div>
 
     <div class="tab-body" id="tab-engines" hidden>
       <h3>Installed</h3>
       <div id="installed"></div>
-      <div class="row"><button class="btn" id="import-engine">Add engine from file…</button></div>
+      <div class="row"><button class="btn" id="import-engine">Add engine from file…</button><button class="btn" id="check-updates">Check for updates</button></div>
       <p class="status" id="engine-status"></p>
       <h3>Download</h3>
       <div id="catalog"></div>
@@ -189,6 +231,7 @@
       <button id="nav-next" title="Forward (→)">▶</button>
       <button id="nav-end" title="End (End)">⏭</button>
       <span class="spacer"></span>
+      <button id="nav-focus" title="Board only (B)">⛶</button>
       <button id="nav-flip" title="Flip board (F)">⇅</button>
       <button id="nav-delete" title="Delete this move and everything after it">✂</button>
       <button id="nav-new" title="New board">＋</button>
@@ -237,6 +280,7 @@
     </div>
   </div>
 </div>
+<button class="focus-exit" id="focus-exit" title="Show the side panel (B)" hidden>Show panel</button>
 <div class="toast" id="toast" hidden></div>
 <script type="module" src="js/app.js"></script>
 </body>

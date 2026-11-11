@@ -78,6 +78,11 @@ fn import_engine(app: AppHandle) -> Result<Option<EngineInfo>, String> {
 }
 
 #[tauri::command(async)]
+fn check_updates(app: AppHandle) -> Result<Vec<(String, String)>, String> {
+    registry(&app)?.updates(USER_AGENT)
+}
+
+#[tauri::command(async)]
 fn add_engine_path(app: AppHandle, path: String) -> Result<EngineInfo, String> {
     registry(&app)?.add_path(std::path::Path::new(path.trim()))
 }
@@ -210,12 +215,22 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(EngineState::default())
+        .setup(|app| {
+            // `--test` runs the logic tests without ever showing the window.
+            if !std::env::args().any(|a| a == "--test") {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             catalog,
             list_engines,
             install_engine,
             import_engine,
             add_engine_path,
+            check_updates,
             save_text_file,
             remove_engine,
             engine_start,

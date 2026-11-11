@@ -104,6 +104,19 @@ function isObviousCapture(move) {
   return exchangeGain(new Chess(move.after), move.to) < VALUE[move.captured];
 }
 
+export const PHASES = ['opening', 'middlegame', 'endgame'];
+
+/** Phase of the game for the position a move is played from. */
+function phaseOf(fen, index, inBook) {
+  let heavy = 0, queens = 0;
+  for (const ch of fen.split(' ')[0]) {
+    const t = ch.toLowerCase();
+    if (t === 'q') { heavy += 9; queens++; } else if (t === 'r') heavy += 5; else if (t === 'b' || t === 'n') heavy += 3;
+  }
+  if (heavy <= 14 || (queens === 0 && heavy <= 20)) return 'endgame';
+  return inBook || index < 12 ? 'opening' : 'middlegame';
+}
+
 function accuracyOf(loss) {
   return Math.max(0, Math.min(100, 103.1668 * Math.exp(-0.04354 * loss) - 3.1669));
 }
@@ -140,6 +153,7 @@ export function reviewGame(positions, moves, openings) {
     const book = inBook && openings && openings[openingKey(mv.after)];
     if (book) opening = book;
     else inBook = false;
+    const phase = phaseOf(mv.before, i, inBook);
     // Without engine evaluations only book moves can be graded.
     if (!book && !(pos && next && pos.lines.length)) { out.push(null); continue; }
 
@@ -177,7 +191,7 @@ export function reviewGame(positions, moves, openings) {
     }
 
     out.push({
-      cls, loss, acc: accuracyOf(loss), isBest,
+      cls, loss, acc: accuracyOf(loss), isBest, phase,
       bestUci, bestSan: bestMove ? bestMove.san : null,
       scoreBefore: pos?.score, scoreAfter: next?.score,
       text: '',
@@ -190,17 +204,20 @@ export function reviewGame(positions, moves, openings) {
 
 /** Accuracy and classification counts per colour. Ungraded (null) moves are skipped. */
 export function summarize(revs, moves) {
-  const stats = { w: { acc: [], counts: {} }, b: { acc: [], counts: {} } };
+  const blank = () => ({ acc: [], counts: {}, phase: { opening: [], middlegame: [], endgame: [] } });
+  const stats = { w: blank(), b: blank() };
   revs.forEach((r, i) => {
     if (!r) return;
     const s = stats[moves[i].color];
     s.acc.push(r.acc);
+    if (r.phase) s.phase[r.phase].push(r.acc);
     s.counts[r.cls] = (s.counts[r.cls] || 0) + 1;
   });
   const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
   return {
     accuracy: { w: mean(stats.w.acc), b: mean(stats.b.acc) },
     counts: { w: stats.w.counts, b: stats.b.counts },
+    phases: Object.fromEntries(['w', 'b'].map((c) => [c, Object.fromEntries(PHASES.map((ph) => [ph, { acc: mean(stats[c].phase[ph]), n: stats[c].phase[ph].length }]))])),
   };
 }
 

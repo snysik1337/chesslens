@@ -2,8 +2,8 @@ import { Chess, validateFen } from '../vendor/chess.js';
 import { invoke, listen, isDesktop } from './backend.js';
 import { Engine } from './engine.js';
 import { Board } from './board.js';
-import { CLASSES, CLASS_ORDER, winPct, fmtScore, pvToSan, reviewGame, summarize, openingKey } from './review.js';
-import { playSound, soundForMove, material, parseClock, estimateRating, fenToPieces, piecesToFen } from './extras.js';
+import { CLASSES, CLASS_ORDER, PHASES, winPct, fmtScore, pvToSan, reviewGame, summarize, openingKey, uciToMove } from './review.js';
+import { playSound, soundForMove, material, parseClock, clockSeconds, estimateRating, fenToPieces, piecesToFen } from './extras.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -28,6 +28,7 @@ const defaults = {
   threads: 2, hash: 256, multipv: 3, liveDepth: 24, reviewDepth: 16,
   engineId: null, engineOn: true, engineOpts: {}, autoReview: true,
   anim: true, sound: true, book: true, playLevel: 2,
+  threats: false, panelW: 440, updates: {}, updCheck: 0,
 };
 let settings = { ...defaults };
 try { settings = { ...defaults, ...JSON.parse(localStorage.getItem('chesslens') || '{}') }; } catch { /* first run */ }
@@ -51,6 +52,8 @@ const game = { root: null, current: null, headers: {}, review: null, startPly: 0
 // Modes that take over the board. At most one is active.
 let retry = null;      // { items, idx, state: 'try' | 'solved', msg, hint, found }
 let play = null;       // { color, level, thinking, byElo }
+let drill = null;      // { items, idx, pos, state, msg, hint, found, missed }: repertoire quiz
+let batch = null;      // { done, total, cancel }: background review of many games
 let preview = null;    // { line, k }: engine-line move being hovered
 let lastShown = null;  // node the board last displayed, for animation and sound
 let skipAnim = false;
@@ -58,6 +61,7 @@ let skipAnim = false;
 function newGame(fen = START, headers = {}) {
   if (reviewing) { reviewCancelled = true; engine.stop(); }
   retry = null;
+  drill = null;
   preview = null;
   lastShown = null;
   if (play) stopPlay();
@@ -86,18 +90,18 @@ function loadPgn(text, { userName } = {}) {
   c.loadPgn(text, { strict: false });
   const headers = c.getHeaders ? c.getHeaders() : c.header();
   const history = c.history({ verbose: true });
-  const clocks = new Map((c.getComments ? c.getComments() : []).map(({ fen, comment }) => [fen, parseClock(comment)]));
+  const clocks = new Map((c.getComments ? c.getComments() : []).map(({ fen, comment }) => [fen, [parseClock(comment), clockSeconds(comment)]]));
   const startFen = history.length ? history[0].before : c.fen();
   newGame(startFen, headers);
   let n = game.root;
-  for (const mv of history) { n = makeNode(n, mv, mv.after); n.clk = clocks.get(mv.after) || null; }
+  for (const mv of history) { n = makeNode(n, mv, mv.after); [n.clk, n.clkSec] = clocks.get(mv.after) || [null, null]; }
   if (userName) {
     const u = userName.toLowerCase();
     board.orientation = (headers.Black || '').toLowerCase() === u ? 'b' : 'w';
   }
   renderAll();
   analyze();
-  if (settings.autoReview && engine.ready && history.length) cancelReview().then(() => runReview());
+  if (settings.autoReview && engine.ready && history.length && !batch) cancelReview().then(() => runReview());
 }
 
 /** Adds a move at the current position (or follows it if it already exists). */
@@ -121,6 +125,7 @@ function playMove(from, to, promotion) {
 function handleBoardMove(from, to, promotion, dragged) {
   skipAnim = !!dragged;
   if (retry) retryAttempt(from, to, promotion);
+  else if (drill) drillAttempt(from, to, promotion);
   else if (play) playUserMove(from, to, promotion);
   else playMove(from, to, promotion);
 }
@@ -128,6 +133,7 @@ function handleBoardMove(from, to, promotion, dragged) {
 function goto(node) {
   if (!node || node === game.current) return;
   retry = null;
+  drill = null;
   game.current = node;
   renderAll();
   analyze();
@@ -135,7 +141,7 @@ function goto(node) {
 
 function deleteCurrent() {
   const n = game.current;
-  if (!n.parent || play || retry) return;
+  if (!n.parent || play || retry || drill) return;
   n.parent.children.splice(n.parent.children.indexOf(n), 1);
   game.current = n.parent;
   refreshSummary();
@@ -266,8 +272,8 @@ async function analyze() {
   const token = ++liveToken;
   live = { node, lines: [], depth: 0 };
   preview = null;
-  if (reviewing) return;
-  if (retry || play) { renderLive(); return; }
+  if (reviewing || batch) { if (batch) renderLive(); return; }
+  if (retry || play || drill) { renderLive(); return; }
   if (!node.rev && classifyAround(node)) renderQuality();
   const usable = settings.engineOn && engine.ready;
 
@@ -280,6 +286,22 @@ async function analyze() {
     if (res && res.lines.length) {
       par.cache = { fen: par.fen, score: res.lines[0], lines: res.lines, depth: CLASSIFY_DEPTH };
       if (classifyAround(par)) renderQuality();
+    }
+  }
+
+  // What would the opponent do if it were their move again? (Not asked while in check.)
+  if (usable && settings.threats && node.threat === undefined && !terminalInfo(node.fen)) {
+    node.threat = null;
+    if (!new Chess(node.fen).inCheck()) {
+      const f = node.fen.split(' ');
+      f[1] = f[1] === 'w' ? 'b' : 'w';
+      f[3] = '-';
+      const flipped = f.join(' ');
+      const res = await engine.search(flipped, { depth: 12, multipv: 1 });
+      if (token !== liveToken) { node.threat = undefined; return; }
+      const u = res && res.lines[0] && res.lines[0].pv[0];
+      const mv = u && uciToMove(flipped, u);
+      if (mv) node.threat = { uci: u, san: mv.san, show: !!(mv.captured || mv.promotion || /[+#]/.test(mv.san)) };
     }
   }
 
@@ -310,7 +332,7 @@ async function analyze() {
 
 /** Score for the current position: live engine output first, review cache second. */
 function currentScore() {
-  if (retry || play) return null;
+  if (retry || play || drill) return null;
   const term = terminalInfo(game.current.fen);
   if (term) return term.score;
   if (live.node === game.current && live.lines[0]) return live.lines[0];
@@ -322,14 +344,17 @@ function renderLive() {
   const node = game.current;
   const term = terminalInfo(node.fen);
   const el = $('lines');
-  if (retry || play) {
-    el.innerHTML = `<div class="msg">${retry ? 'Retry mode: engine lines are hidden.' : term ? esc(term.text) : 'Game in progress: engine lines are hidden.'}</div>`;
+  if (retry || play || drill) {
+    el.innerHTML = `<div class="msg">${retry ? 'Retry mode: engine lines are hidden.' : drill ? 'Repertoire training: engine lines are hidden.' : term ? esc(term.text) : 'Game in progress: engine lines are hidden.'}</div>`;
     $('engine-depth').textContent = '';
   } else if (term) {
     el.innerHTML = `<div class="msg">${esc(term.text)}</div>`;
     $('engine-depth').textContent = '';
   } else if (!engine.ready) {
     el.innerHTML = engines.length ? '<div class="msg">Starting engine…</div>' : '';
+    $('engine-depth').textContent = '';
+  } else if (batch) {
+    el.innerHTML = `<div class="msg">Analysing your games for Insights… ${batch.done} of ${batch.total}</div>`;
     $('engine-depth').textContent = '';
   } else if (reviewing) {
     el.innerHTML = `<div class="msg">Reviewing the game… ${reviewPct}%</div>`;
@@ -338,10 +363,10 @@ function renderLive() {
     el.innerHTML = '<div class="msg">Live analysis is off.</div>';
     $('engine-depth').textContent = '';
   } else if (!live.lines.length) {
-    el.innerHTML = '<div class="msg">Thinking…</div>';
+    el.innerHTML = `${threatRow(node)}<div class="msg">Thinking…</div>`;
   } else {
     const [, turn, , , , full] = node.fen.split(' ');
-    el.innerHTML = live.lines.slice(0, settings.multipv).map((l, i) => {
+    el.innerHTML = threatRow(node) + live.lines.slice(0, settings.multipv).map((l, i) => {
       const sans = pvToSan(node.fen, l.pv, 10);
       let num = Number(full), white = turn === 'w', txt = '';
       sans.forEach((s, k) => {
@@ -357,6 +382,12 @@ function renderLive() {
   }
   renderEvalBar();
   renderBoard();
+}
+
+function threatRow(node) {
+  if (!settings.threats || node.threat === undefined) return '';
+  const t = node.threat;
+  return `<div class="pv threat"><span class="score">Threat</span><span class="san">${t && t.show ? `<b>${esc(t.san)}</b>` : 'nothing forcing right now'}</span></div>`;
 }
 
 function renderEvalBar() {
@@ -436,6 +467,8 @@ async function install(catalogId) {
     const info = await invoke('install_engine', { catalogId });
     toast(`${info.name} is installed.`);
     installing.delete(catalogId);
+    delete settings.updates[catalogId];
+    save();
     await refreshEngines({ activate: info.id });
   } catch (e) {
     installing.delete(catalogId);
@@ -527,10 +560,53 @@ async function doReview(main) {
   }
   const result = reviewGame(positions, main.map((n) => n.move), openings);
   main.forEach((n, i) => { n.rev = result.moves[i]; });
-  game.review = { accuracy: result.accuracy, counts: result.counts, opening: result.opening, depth };
+  game.review = { accuracy: result.accuracy, counts: result.counts, phases: result.phases, opening: result.opening, depth };
   renderAll();
   analyze();
   return result;
+}
+
+function gradeOf(acc) {
+  return acc >= 92 ? 'best' : acc >= 85 ? 'excellent' : acc >= 75 ? 'good' : acc >= 65 ? 'inaccuracy' : acc >= 50 ? 'mistake' : 'blunder';
+}
+function accCell(p) {
+  return p && p.n ? `<span class="ci ci-${gradeOf(p.acc)}">${CLASSES[gradeOf(p.acc)].glyph}</span>${p.acc.toFixed(1)}` : '–';
+}
+function phaseTable(ph) {
+  if (!ph) return '';
+  const label = { opening: 'Opening', middlegame: 'Middlegame', endgame: 'Endgame' };
+  return `<h3>By phase</h3><table class="mini"><tr><th>Phase</th><th class="num">White</th><th class="num">Black</th></tr>${
+    PHASES.map((p) => `<tr><td>${label[p]}</td><td class="num">${accCell(ph.w[p])}</td><td class="num">${accCell(ph.b[p])}</td></tr>`).join('')}</table>`;
+}
+
+/** Seconds spent on each main-line move, from PGN clocks. Null when the game has none. */
+function timeSpent() {
+  const main = mainline();
+  if (!main.some((n) => n.clkSec != null)) return null;
+  const tc = /^(\d+)(?:\+(\d+))?$/.exec(game.headers.TimeControl || '');
+  const inc = tc ? Number(tc[2] || 0) : 0;
+  const last = { w: tc ? Number(tc[1]) : null, b: tc ? Number(tc[1]) : null };
+  return main.map((n) => {
+    const c = n.move.color;
+    const spent = n.clkSec != null && last[c] != null ? Math.max(0, last[c] - n.clkSec + inc) : null;
+    if (n.clkSec != null) last[c] = n.clkSec;
+    return spent;
+  });
+}
+function timeChart() {
+  const spent = timeSpent();
+  if (!spent) return '';
+  const main = mainline();
+  const max = Math.max(1, ...spent.map((x) => x || 0));
+  const bars = spent.map((x, i) => {
+    if (!x) return '';
+    const n = main[i], white = n.move.color === 'w', h = (x / max) * 47;
+    const fill = n.rev && ['inaccuracy', 'mistake', 'miss', 'blunder'].includes(n.rev.cls) ? CLASSES[n.rev.cls].color : white ? '#d9d7d3' : '#77746f';
+    return `<rect x="${i + 0.1}" width="0.8" y="${white ? 50 - h : 50}" height="${h}" fill="${fill}"><title>${moveLabel(n, true)} ${esc(n.move.san)}: ${x.toFixed(x < 10 ? 1 : 0)}s</title></rect>`;
+  }).join('');
+  const longest = spent.indexOf(Math.max(...spent.map((x) => x || 0)));
+  return `<h3>Time per move</h3><svg class="timechart" id="timechart" viewBox="0 0 ${main.length} 100" preserveAspectRatio="none">${bars}</svg>
+    <p class="hint small" style="margin-top:6px">White above the line, Black below. Coloured bars are inaccuracies, mistakes, misses and blunders. Longest think: ${moveLabel(main[longest], true)} ${esc(main[longest].move.san)} (${Math.round(spent[longest])}s).</p>`;
 }
 
 function renderReview() {
@@ -559,6 +635,8 @@ function renderReview() {
       ${all > mine ? `<button class="btn" data-retry-side="">Retry all (${all})</button>` : ''}
     </div>` : ''}
     <table class="counts">${rows}</table>
+    ${phaseTable(r.phases)}
+    ${timeChart()}
     <p class="hint small">${r.opening ? `Opening: ${esc(r.opening[1])} (${esc(r.opening[0])}). ` : ''}Reviewed at depth ${r.depth} with ${esc(engine.info?.name || 'the engine')}. Click a row to jump to those moves. The rating figure is a rough estimate from accuracy alone.</p>`;
 }
 
@@ -597,6 +675,13 @@ function renderBoard() {
     movable = retry.state === 'solved' ? 'none' : item.move.color;
     if (retry.state === 'solved') arrows.push(green(best));
     else if (retry.hint) lastMove = { from: best.slice(0, 2), to: best.slice(0, 2) };
+  } else if (drill) {
+    const line = drill.items[drill.idx];
+    badge = null;
+    movable = drill.state === 'try' ? line.color : 'none';
+    if (drill.hint && drill.state === 'try') {
+      try { const m = new Chess(n.fen).move(line.moves[drill.pos]); lastMove = { from: m.from, to: m.from }; } catch { /* line does not fit */ }
+    }
   } else if (play) {
     badge = null;
     movable = !play.thinking && !n.children.length && n.fen.split(' ')[1] === play.color ? play.color : 'none';
@@ -605,6 +690,10 @@ function renderBoard() {
   } else if (settings.arrow && settings.engineOn && !reviewing && live.node === n && live.lines[0]) {
     const u = live.lines[0].pv[0];
     arrows.push({ from: u.slice(0, 2), to: u.slice(2, 4), color: '#4a90d9', opacity: 0.7 });
+  }
+
+  if (settings.threats && !retry && !play && !drill && n.threat && n.threat.show) {
+    arrows.push({ from: n.threat.uci.slice(0, 2), to: n.threat.uci.slice(2, 4), color: '#e0483a', opacity: 0.8 });
   }
 
   // Slide the piece and play a sound when stepping exactly one move forward or back.
@@ -701,7 +790,7 @@ function renderOpening() {
   // Book moves: every legal move that leads to a named opening position.
   const el = $('book');
   let chips = [];
-  if (openings && settings.book && !retry && !play) {
+  if (openings && settings.book && !retry && !play && !drill) {
     chips = new Chess(game.current.fen).moves({ verbose: true })
       .map((m) => [m, openings[openingKey(m.after)]]).filter(([, o]) => o);
   }
@@ -712,7 +801,7 @@ function renderOpening() {
 
 function renderCoach() {
   const el = $('coach'), rev = game.current.rev;
-  if (!rev || retry || play) { el.hidden = true; return; }
+  if (!rev || retry || play || drill) { el.hidden = true; return; }
   el.hidden = false;
   el.innerHTML = `${ci(rev.cls)}<div><div>${esc(rev.text)}</div>` +
     (rev.scoreBefore && rev.scoreAfter ? `<div class="ev">Evaluation ${esc(fmtScore(rev.scoreBefore))} → ${esc(fmtScore(rev.scoreAfter))}</div>` : '') +
@@ -772,10 +861,11 @@ function renderEngines() {
   $('catalog').innerHTML = catalog.map((c) => {
     const have = engines.find((e) => e.id === c.id);
     const busy = installing.has(c.id);
+    const upd = have && settings.updates[c.id] && settings.updates[c.id] !== have.version ? settings.updates[c.id] : null;
     return `<div class="card">
-      <div class="name">${esc(c.name)}${have ? `<span class="tag">installed ${esc(have.version)}</span>` : ''}</div>
+      <div class="name">${esc(c.name)}${have ? `<span class="tag">installed ${esc(have.version)}</span>` : ''}${upd ? `<span class="tag" style="background:var(--green);color:#fff">new: ${esc(upd)}</span>` : ''}</div>
       <div class="sub">${esc(c.blurb)}</div>
-      <div class="acts"><button class="btn${have ? '' : ' primary'}" data-install="${esc(c.id)}"${busy ? ' disabled' : ''}>${busy ? 'Installing…' : have ? 'Update' : 'Install'}</button></div>
+      <div class="acts"><button class="btn${have && !upd ? '' : ' primary'}" data-install="${esc(c.id)}"${busy ? ' disabled' : ''}>${busy ? 'Installing…' : upd ? 'Update' : have ? 'Reinstall' : 'Install'}</button></div>
       <div class="progress" data-progress="${esc(c.id)}"${busy ? '' : ' hidden'}><div></div><span></span></div>
     </div>`;
   }).join('');
@@ -833,8 +923,11 @@ function renderAll() {
 
 function showTab(name) {
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
-  for (const t of ['analysis', 'review', 'games', 'play', 'engines', 'settings']) $(`tab-${t}`).hidden = t !== name;
+  for (const t of ['analysis', 'review', 'games', 'play', 'insights', 'engines', 'settings']) $(`tab-${t}`).hidden = t !== name;
   if (name === 'games') renderLibrary();
+  if (name === 'play') renderRep();
+  if (name === 'insights') renderInsights();
+  if (name === 'engines') checkUpdates(false);
 }
 
 let toastTimer;
@@ -860,7 +953,7 @@ function keyMoves() { return mainline().filter((n) => n.rev && KEY.includes(n.re
 
 function renderKeyNav() {
   const k = keyMoves();
-  $('keynav').hidden = !k.length || !!retry || !!play;
+  $('keynav').hidden = !k.length || !!retry || !!play || !!drill;
   const i = k.indexOf(game.current);
   $('key-count').textContent = i >= 0 ? `Key move ${i + 1} of ${k.length}` : `${k.length} key move${k.length === 1 ? '' : 's'}`;
 }
@@ -1079,14 +1172,328 @@ function renderModes() {
     $('play-status').textContent = play.thinking ? `${engine.info?.name || 'Engine'} is thinking…` : 'Your move';
     $('play-takeback').disabled = play.thinking || mainline().length < (play.color === 'w' ? 2 : 3);
   }
-  $('retry').hidden = !retry;
-  if (retry) {
-    $('retry-text').innerHTML = `<b>${retry.idx + 1} / ${retry.items.length}</b> &nbsp;${retry.msg}`;
-    const solved = retry.state === 'solved';
+  const m = retry || drill;
+  $('retry').hidden = !m;
+  if (m) {
+    $('retry-text').innerHTML = `<b>${m.idx + 1} / ${m.items.length}</b> &nbsp;${m.msg}`;
+    const solved = m.state === 'solved';
     $('retry-hint').hidden = solved;
     $('retry-answer').hidden = solved;
-    $('retry-next').textContent = retry.idx + 1 < retry.items.length ? (solved ? 'Next' : 'Skip') : 'Finish';
+    $('retry-next').textContent = m.idx + 1 < m.items.length ? (solved ? 'Next' : 'Skip') : 'Finish';
   }
+}
+
+// ---------------------------------------------------------------- layout
+function applyLayout() {
+  document.documentElement.style.setProperty('--panel-w', `${settings.panelW}px`);
+}
+function toggleFocus() {
+  const on = $('app').classList.toggle('focus');
+  $('focus-exit').hidden = !on;
+}
+
+// ---------------------------------------------------------------- engine updates
+async function checkUpdates(manual) {
+  if (!isDesktop) return;
+  if (!manual && Date.now() - settings.updCheck < 6 * 3600 * 1000) return;
+  try {
+    const list = await invoke('check_updates');
+    settings.updates = Object.fromEntries(list);
+    settings.updCheck = Date.now();
+    save();
+    renderEngines();
+    if (manual) toast(list.length ? `${list.length} engine update${list.length === 1 ? '' : 's'} available.` : 'All downloaded engines are up to date.');
+  } catch (e) {
+    if (manual) toast(String(e), true);
+  }
+}
+
+// ---------------------------------------------------------------- opening repertoire
+function loadRep() {
+  try { return JSON.parse(localStorage.getItem('chesslens-repertoire') || '[]'); } catch { return []; }
+}
+function storeRep(list) {
+  try { localStorage.setItem('chesslens-repertoire', JSON.stringify(list)); } catch { toast('The repertoire could not be saved.', true); }
+}
+function numbered(sans) {
+  return sans.map((san, i) => (i % 2 === 0 ? `${i / 2 + 1}. ${san}` : san)).join(' ');
+}
+
+function addRepLine() {
+  if (game.root.fen !== START) { toast('Repertoire lines have to start from the normal starting position.'); return; }
+  const sans = [];
+  let name = '';
+  for (let n = game.current; n.parent; n = n.parent) {
+    sans.unshift(n.move.san);
+    const o = openings && openings[openingKey(n.fen)];
+    if (o && !name) name = o[1];
+  }
+  if (sans.length < 2) { toast('Play at least two moves on the board first.'); return; }
+  const list = loadRep(), color = board.orientation, key = sans.join(' ');
+  if (list.some((l) => l.color === color && l.moves.join(' ') === key)) { toast('That line is already in your repertoire.'); return; }
+  list.push({ id: Date.now(), name: name || `Line ${list.length + 1}`, color, moves: sans });
+  storeRep(list);
+  renderRep();
+  toast(`Saved as a ${color === 'w' ? 'White' : 'Black'} line. Flip the board first to save it for the other side.`);
+}
+
+function renderRep() {
+  const list = loadRep();
+  $('rep-list').innerHTML = list.length ? list.map((l) => `
+    <div class="game rep">
+      <div>${esc(l.name)} <span class="tag">${l.color === 'w' ? 'White' : 'Black'}</span></div>
+      <div><button class="btn" data-one="${l.id}">Train</button> <button class="del" data-del="${l.id}" title="Remove">×</button></div>
+      <div class="meta" title="${esc(numbered(l.moves))}">${esc(numbered(l.moves))}</div>
+    </div>`).join('') : '<p class="hint">No lines yet. Play an opening on the board, then press "Add the line on the board".</p>';
+}
+
+function startDrill(color, id) {
+  if (play) { toast('Finish or resign the current game first.'); return; }
+  let items = loadRep().filter((l) => (id ? String(l.id) === String(id) : !color || l.color === color));
+  if (!items.length) { toast('There are no repertoire lines to train yet.'); return; }
+  items = items.map((l) => [Math.random(), l]).sort((a, b) => a[0] - b[0]).map((x) => x[1]);
+  if (engine.ready) engine.stop();
+  showTab('analysis');
+  drill = { items, idx: 0, found: 0 };
+  setupDrillLine();
+}
+
+function setupDrillLine() {
+  const d = drill, line = d.items[d.idx];
+  newGame(START, { White: line.color === 'w' ? 'You' : 'Repertoire', Black: line.color === 'w' ? 'Repertoire' : 'You' });
+  drill = d;   // newGame clears modes
+  Object.assign(d, { pos: 0, state: 'try', hint: false, missed: false });
+  d.msg = `<b>${esc(line.name)}</b>: play ${line.color === 'w' ? "White's" : "Black's"} moves from memory.`;
+  board.orientation = line.color;
+  drillAdvance();
+}
+
+function drillPlaySan(san) {
+  try {
+    const mv = new Chess(game.current.fen).move(san);
+    return !!addMove(mv.from, mv.to, mv.promotion);
+  } catch { return false; }
+}
+
+/** Plays the other side's moves until it is the user's turn or the line ends. */
+function drillAdvance() {
+  const d = drill, line = d.items[d.idx];
+  while (d.pos < line.moves.length && game.current.fen.split(' ')[1] !== line.color) {
+    if (!drillPlaySan(line.moves[d.pos])) { d.pos = line.moves.length; break; }
+    d.pos++;
+  }
+  if (d.pos >= line.moves.length) {
+    d.state = 'solved';
+    if (!d.missed) d.found++;
+    d.msg = `<span class="ok">Line complete${d.missed ? '' : ', no slips'}.</span> ${esc(line.name)}`;
+    if (settings.sound) playSound('right');
+  }
+  renderAll();
+  renderLive();
+}
+
+function drillAttempt(from, to, promotion) {
+  const d = drill, line = d.items[d.idx];
+  if (d.state !== 'try') return;
+  let mv;
+  try { mv = new Chess(game.current.fen).move({ from, to, promotion }); } catch { return; }
+  if (mv.san !== line.moves[d.pos]) {
+    d.missed = true;
+    d.msg = `<span class="no">${esc(mv.san)} is not the move in this line.</span> Try again.`;
+    if (settings.sound) playSound('wrong');
+    renderModes();
+    renderBoard();
+    return;
+  }
+  addMove(from, to, promotion);
+  d.pos++;
+  d.hint = false;
+  d.msg = '<span class="ok">Right.</span> Keep going.';
+  renderAll();
+  setTimeout(() => { if (drill === d && d.items[d.idx] === line) drillAdvance(); }, 350);
+}
+
+function drillShow() {
+  const d = drill, line = d.items[d.idx];
+  if (d.state !== 'try') return;
+  d.missed = true;
+  d.hint = false;
+  d.msg = `The move was <b>${esc(line.moves[d.pos])}</b>.`;
+  drillPlaySan(line.moves[d.pos]);
+  d.pos++;
+  drillAdvance();
+}
+
+function drillNext() {
+  if (drill.idx + 1 < drill.items.length) { drill.idx++; setupDrillLine(); return; }
+  toast(`Done. ${drill.found} of ${drill.items.length} line${drill.items.length === 1 ? '' : 's'} without a slip.`);
+  exitDrill();
+}
+
+function exitDrill() {
+  if (!drill) return;
+  drill = null;
+  renderAll();
+  analyze();
+}
+
+// ---------------------------------------------------------------- insights across games
+function loadInsights() {
+  try { return JSON.parse(localStorage.getItem('chesslens-insights') || '{}'); } catch { return {}; }
+}
+function storeInsights(map) {
+  try { localStorage.setItem('chesslens-insights', JSON.stringify(map)); } catch { toast('Insights could not be saved.', true); }
+}
+function gameKey(headers, sans) {
+  let h = 0;
+  for (const ch of `${headers.White}|${headers.Black}|${headers.Date}|${sans.join(' ')}`) h = (Math.imul(h, 31) + ch.charCodeAt(0)) | 0;
+  return `${sans.length}_${(h >>> 0).toString(36)}`;
+}
+
+/** Reviews one PGN without touching the board. Returns a summary record, or null if cancelled. */
+async function reviewHeadless(pgn, depth, extra) {
+  const c = new Chess();
+  c.loadPgn(pgn, { strict: false });
+  const headers = c.getHeaders ? c.getHeaders() : c.header();
+  const hist = c.history({ verbose: true });
+  if (hist.length < 8) return { skip: true };
+  const key = gameKey(headers, hist.map((m) => m.san));
+  const stored = loadInsights()[key];
+  if (stored && stored.depth >= depth) return stored;
+
+  // Book moves need no engine: start at the position before the first non-book move.
+  let book = 0;
+  while (openings && book < hist.length && openings[openingKey(hist[book].after)]) book++;
+  const fens = [hist[0].before, ...hist.map((m) => m.after)];
+  const positions = fens.map(() => null);
+  for (let i = book; i < fens.length; i++) {
+    const term = terminalInfo(fens[i]);
+    if (term) { positions[i] = { fen: fens[i], score: term.score, lines: [], terminal: term.terminal, depth: 99 }; continue; }
+    const res = await engine.search(fens[i], { depth, multipv: 2 });
+    if (!res || !res.lines.length) return null;
+    positions[i] = { fen: fens[i], score: res.lines[0], lines: res.lines, depth };
+  }
+  const r = reviewGame(positions, hist, openings);
+  return {
+    key, depth, white: headers.White || '?', black: headers.Black || '?', result: headers.Result || '*',
+    ts: extra.ts || Date.parse(String(headers.UTCDate || headers.Date || '').replace(/\./g, '-')) || 0,
+    tc: extra.tc || 'other', opening: r.opening, accuracy: r.accuracy, counts: r.counts, phases: r.phases, plies: hist.length,
+  };
+}
+
+async function runInsights() {
+  if (batch) return;
+  if (!engine.ready) { toast('Install or choose an engine first.'); showTab('engines'); return; }
+  if (play) { toast('Finish or resign the current game first.'); return; }
+  const fromList = $('ins-source').value === 'fetched';
+  let src = fromList ? gameList.map((g) => ({ pgn: g.pgn, tc: g.tc, ts: g.ts })) : loadLibrary().map((g) => ({ pgn: g.pgn, ts: Date.parse(g.date) }));
+  if (!src.length) {
+    setStatus('ins-status', fromList ? 'Fetch your games in the Games tab first (Import by username).' : 'Your library is empty. Save some games first.', true);
+    return;
+  }
+  src = src.slice(0, Number($('ins-count').value));
+  const depth = Number($('ins-depth').value);
+  await cancelReview();
+  retry = null;
+  drill = null;
+  batch = { done: 0, total: src.length, cancel: false };
+  $('ins-run').disabled = true;
+  $('ins-cancel').hidden = false;
+  setStatus('ins-status', '');
+  await engine.stop();
+  renderAll();
+  renderLive();
+  let added = 0, failed = 0;
+  for (const g of src) {
+    if (batch.cancel) break;
+    setProgress($('ins-progress'), (batch.done / batch.total) * 100, `${batch.done} / ${batch.total}`);
+    renderLive();
+    let rec = null;
+    try { rec = await reviewHeadless(g.pgn, depth, g); } catch { failed++; batch.done++; continue; }
+    if (!rec) break;   // engine stopped or cancelled
+    if (!rec.skip) {
+      const map = loadInsights();
+      if (!map[rec.key] || map[rec.key].depth < rec.depth) added++;
+      map[rec.key] = rec;
+      storeInsights(map);
+    }
+    batch.done++;
+    renderInsights();
+  }
+  const cancelled = batch.cancel || batch.done < batch.total;
+  batch = null;
+  $('ins-run').disabled = false;
+  $('ins-cancel').hidden = true;
+  $('ins-progress').hidden = true;
+  setStatus('ins-status', `${cancelled ? 'Stopped early. ' : ''}${added} game${added === 1 ? '' : 's'} analysed${failed ? `, ${failed} could not be read` : ''}.`);
+  renderInsights();
+  renderAll();
+  analyze();
+}
+
+function renderInsights() {
+  const all = Object.values(loadInsights());
+  const el = $('ins-result');
+  if (!all.length) { el.innerHTML = ''; return; }
+  // The player is whoever appears in the most games, unless a name was typed.
+  let who = $('ins-player').value.trim();
+  if (!who) {
+    const tally = {};
+    for (const g of all) for (const nm of [g.white, g.black]) tally[nm] = (tally[nm] || 0) + 1;
+    who = Object.entries(tally).sort((a, b) => b[1] - a[1])[0][0];
+  }
+  const lw = who.toLowerCase();
+  const mine = all.filter((g) => g.white.toLowerCase() === lw || g.black.toLowerCase() === lw)
+    .map((g) => {
+      const c = g.white.toLowerCase() === lw ? 'w' : 'b';
+      const score = g.result === '1/2-1/2' ? 0.5 : (g.result === '1-0') === (c === 'w') ? 1 : g.result === '*' ? null : 0;
+      return { g, c, acc: g.accuracy[c], score, counts: g.counts[c] || {}, phases: g.phases ? g.phases[c] : null };
+    }).filter((x) => x.acc != null).sort((a, b) => a.g.ts - b.g.ts);
+  if (!mine.length) { el.innerHTML = `<p class="hint">No analysed games found for "${esc(who)}".</p>`; return; }
+
+  const avg = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+  const f1 = (x) => (x == null ? '–' : x.toFixed(1));
+  const pct = (xs) => { const s = xs.filter((x) => x.score != null); return s.length ? `${Math.round(avg(s.map((x) => x.score)) * 100)}%` : '–'; };
+  const overall = avg(mine.map((x) => x.acc));
+  const tone = (a) => (a == null ? '' : a >= overall + 2 ? ' high' : a <= overall - 2 ? ' low' : '');
+  const group = (keyOf) => {
+    const m = new Map();
+    for (const x of mine) { const k = keyOf(x); if (!m.has(k)) m.set(k, []); m.get(k).push(x); }
+    return [...m.entries()].sort((a, b) => b[1].length - a[1].length);
+  };
+  const table = (title, head, rows) => `<h3>${title}</h3><table class="mini"><tr><th>${head}</th><th class="num">Games</th><th class="num">Score</th><th class="num">Accuracy</th></tr>${
+    rows.map(([k, xs]) => `<tr><td class="name" title="${esc(k)}">${esc(k)}</td><td class="num">${xs.length}</td><td class="num">${pct(xs)}</td><td class="num${tone(avg(xs.map((x) => x.acc)))}">${f1(avg(xs.map((x) => x.acc)))}</td></tr>`).join('')}</table>`;
+
+  const phaseAvg = (ph) => {
+    let sum = 0, n = 0;
+    for (const x of mine) { const p = x.phases && x.phases[ph]; if (p && p.n) { sum += p.acc * p.n; n += p.n; } }
+    return n ? { acc: sum / n, n } : null;
+  };
+  const per = (cls) => avg(mine.map((x) => x.counts[cls] || 0));
+  const total = (cls) => mine.reduce((s, x) => s + (x.counts[cls] || 0), 0);
+  const pts = mine.map((x, i) => `${mine.length === 1 ? 0.5 : i / (mine.length - 1)},${(100 - x.acc).toFixed(1)}`);
+  const lo = Math.min(...mine.map((x) => x.acc)), hi = Math.max(...mine.map((x) => x.acc));
+
+  el.innerHTML = `
+    <h3>${esc(who)} · ${mine.length} game${mine.length === 1 ? '' : 's'}</h3>
+    <div class="stat-row">
+      <div class="stat"><div class="v">${f1(overall)}</div><div class="l">accuracy</div></div>
+      <div class="stat"><div class="v">${pct(mine)}</div><div class="l">score</div></div>
+      <div class="stat"><div class="v">${f1(avg(mine.filter((x) => x.c === 'w').map((x) => x.acc)))}</div><div class="l">as White</div></div>
+      <div class="stat"><div class="v">${f1(avg(mine.filter((x) => x.c === 'b').map((x) => x.acc)))}</div><div class="l">as Black</div></div>
+    </div>
+    ${mine.length > 2 ? `<svg class="spark" viewBox="0 ${(100 - hi - 3).toFixed(1)} 1 ${(hi - lo + 6).toFixed(1)}" preserveAspectRatio="none"><polyline points="${pts.join(' ')}" fill="none" stroke="#81b64c" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>
+    <p class="hint small" style="margin-top:4px">Accuracy per game, oldest to newest (${f1(lo)} to ${f1(hi)}).</p>` : ''}
+    <h3>By phase</h3>
+    <table class="mini"><tr><th>Phase</th><th class="num">Accuracy</th></tr>${
+      PHASES.map((p) => `<tr><td>${p[0].toUpperCase() + p.slice(1)}</td><td class="num">${accCell(phaseAvg(p))}</td></tr>`).join('')}</table>
+    <h3>Per game, on average</h3>
+    <table class="mini"><tr><th>Move type</th><th class="num">Per game</th><th class="num">Total</th></tr>${
+      ['blunder', 'miss', 'mistake', 'inaccuracy', 'great', 'brilliant'].map((k) => `<tr><td><span class="ci ci-${k}">${CLASSES[k].glyph}</span>${CLASSES[k].label}</td><td class="num">${per(k).toFixed(1)}</td><td class="num">${total(k)}</td></tr>`).join('')}</table>
+    ${table('By opening', 'Opening', group((x) => (x.g.opening ? x.g.opening[1].split(':')[0] : 'Unknown')).slice(0, 8))}
+    ${table('By time control', 'Time control', group((x) => x.g.tc || 'other'))}
+    ${table('By colour', 'Colour', group((x) => (x.c === 'w' ? 'White' : 'Black')))}
+    <p class="hint small">Green and red mark results at least two points above or below your overall accuracy. Small samples are not reliable.</p>`;
 }
 
 // ---------------------------------------------------------------- position editor
@@ -1228,7 +1635,7 @@ async function fetchGames() {
       gameList = list.filter((g) => g.pgn && g.rules === 'chess').slice(0, 50).map((g) => ({
         white: g.white.username, black: g.black.username, wr: g.white.rating, br: g.black.rating,
         result: g.white.result === 'win' ? '1-0' : g.black.result === 'win' ? '0-1' : '½-½',
-        meta: `${g.time_class} · ${day(g.end_time * 1000)}`, pgn: g.pgn,
+        meta: `${g.time_class} · ${day(g.end_time * 1000)}`, pgn: g.pgn, tc: g.time_class, ts: g.end_time * 1000,
       }));
     } else {
       const url = `https://lichess.org/api/games/user/${encodeURIComponent(user)}?max=40&pgnInJson=true&opening=true&clocks=true`;
@@ -1237,7 +1644,7 @@ async function fetchGames() {
       gameList = body.split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((g) => g.variant === 'standard' && g.pgn).map((g) => ({
         white: who(g.players.white), black: who(g.players.black), wr: g.players.white.rating, br: g.players.black.rating,
         result: g.winner === 'white' ? '1-0' : g.winner === 'black' ? '0-1' : '½-½',
-        meta: `${g.speed} · ${day(g.createdAt)}${g.opening ? ` · ${g.opening.name}` : ''}`, pgn: g.pgn,
+        meta: `${g.speed} · ${day(g.createdAt)}${g.opening ? ` · ${g.opening.name}` : ''}`, pgn: g.pgn, tc: g.speed, ts: g.createdAt,
       }));
     }
     renderGameList(user);
@@ -1284,10 +1691,10 @@ function wire() {
   $('key-next').onclick = () => keyStep(1);
 
   // retry
-  $('retry-hint').onclick = () => { retry.hint = true; renderBoard(); };
-  $('retry-answer').onclick = () => retrySolved(`The best move was <b>${esc(retry.items[retry.idx].rev.bestSan)}</b>.`, false);
-  $('retry-next').onclick = retryNext;
-  $('retry-exit').onclick = exitRetry;
+  $('retry-hint').onclick = () => { (retry || drill).hint = true; renderBoard(); };
+  $('retry-answer').onclick = () => (retry ? retrySolved(`The best move was <b>${esc(retry.items[retry.idx].rev.bestSan)}</b>.`, false) : drillShow());
+  $('retry-next').onclick = () => (retry ? retryNext() : drillNext());
+  $('retry-exit').onclick = () => (retry ? exitRetry() : exitDrill());
 
   // play
   $('play-level').innerHTML = LEVELS.map((l, i) => `<option value="${i}">${l.name}${l.elo ? ` (about ${l.elo})` : ''}</option>`).join('');
@@ -1295,6 +1702,49 @@ function wire() {
   $('play-start').onclick = startPlay;
   $('play-takeback').onclick = takeBack;
   $('play-resign').onclick = () => { if (play) endPlay(play.color === 'w' ? '0-1' : '1-0', 'You resigned.'); };
+
+  // threats, layout
+  $('threat-toggle').classList.toggle('on', settings.threats);
+  $('threat-toggle').onclick = () => {
+    settings.threats = !settings.threats;
+    save();
+    $('threat-toggle').classList.toggle('on', settings.threats);
+    analyze();
+  };
+  const sp = $('splitter');
+  sp.addEventListener('pointerdown', (e) => { sp.setPointerCapture(e.pointerId); sp.classList.add('drag'); });
+  sp.addEventListener('pointermove', (e) => {
+    if (!sp.classList.contains('drag')) return;
+    settings.panelW = Math.round(Math.max(340, Math.min(820, window.innerWidth - 380, window.innerWidth - e.clientX - 18)));
+    applyLayout();
+  });
+  sp.addEventListener('pointerup', () => { sp.classList.remove('drag'); save(); });
+  $('nav-focus').onclick = toggleFocus;
+  $('focus-exit').onclick = toggleFocus;
+
+  // repertoire
+  $('rep-add').onclick = addRepLine;
+  $('rep-train').onclick = () => startDrill();
+  $('rep-train-w').onclick = () => startDrill('w');
+  $('rep-train-b').onclick = () => startDrill('b');
+  $('rep-list').addEventListener('click', (e) => {
+    const { del, one } = e.target.dataset;
+    if (del) { storeRep(loadRep().filter((l) => String(l.id) !== del)); renderRep(); }
+    if (one) startDrill(null, one);
+  });
+
+  // insights
+  $('ins-run').onclick = runInsights;
+  $('ins-cancel').onclick = () => { if (batch) { batch.cancel = true; engine.stop(); } };
+  $('ins-clear').onclick = () => { storeInsights({}); renderInsights(); toast('Stored results removed.'); };
+  $('ins-player').onchange = renderInsights;
+  $('check-updates').onclick = () => checkUpdates(true);
+  $('review-result').addEventListener('click', (e) => {
+    const svg = e.target.closest('#timechart');
+    if (!svg) return;
+    const r = svg.getBoundingClientRect(), main = mainline();
+    goto(main[Math.min(main.length - 1, Math.floor(((e.clientX - r.left) / r.width) * main.length))]);
+  });
 
   // editor
   $('open-editor').onclick = openEditor;
@@ -1364,6 +1814,8 @@ function wire() {
   document.addEventListener('keydown', (e) => {
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === 'Escape' && retry) exitRetry();
+    else if (e.key === 'Escape' && drill) exitDrill();
+    else if (e.key === 'b' || e.key === 'B') toggleFocus();
     else if (e.shiftKey && e.key === 'ArrowLeft') keyStep(-1);
     else if (e.shiftKey && e.key === 'ArrowRight') keyStep(1);
     else if (e.key === 'ArrowLeft') step(-1);
@@ -1508,7 +1960,7 @@ function wire() {
 }
 
 function flip() {
-  if (play || retry) return;
+  if (play || retry || drill) return;
   board.orientation = board.orientation === 'w' ? 'b' : 'w';
   renderAll();
 }
@@ -1603,16 +2055,66 @@ async function selfTest() {
       loadPgn(gameList[0].pgn, { userName: user });
       await log(`  first game: ${mainline().length} plies, ${game.headers.White} vs ${game.headers.Black}, clock on move 1: ${mainline()[0]?.clk}`);
     }
+    // phases and time chart on the last imported game (it has clocks)
+    $('review-depth').value = '12';
+    const r3 = await runReview();
+    if (!r3) throw new Error('third review returned nothing');
+    const ph = (c) => PHASES.map((p) => `${p} ${r3.phases[c][p].n ? r3.phases[c][p].acc.toFixed(0) : '-'}`).join(', ');
+    await log(`phases white: ${ph('w')}; black: ${ph('b')}`);
+    const spent = timeSpent();
+    await log(`time chart drawn: ${!!document.getElementById('timechart')}; moves with a time: ${spent ? spent.filter((x) => x != null).length : 0}`);
+
+    // threats
+    settings.threats = true;
+    goto(mainline()[24]);
+    await waitFor(() => game.current.threat !== undefined && live.lines.length > 0, 20000);
+    await log(`threat at move 13: ${JSON.stringify(game.current.threat)}; row shown: ${!!document.querySelector('.pv.threat')}`);
+    settings.threats = false;
+
+    // insights over the fetched list
+    $('ins-source').value = 'fetched';
+    $('ins-count').value = '10';
+    $('ins-depth').value = '10';
+    const t1 = performance.now();
+    await runInsights();
+    await log(`insights (${((performance.now() - t1) / 1000).toFixed(0)}s): "${$('ins-status').textContent}"`);
+    await log(`  result: ${$('ins-result').textContent.replace(/\s+/g, ' ').slice(0, 520)}`);
+    if (!Object.keys(loadInsights()).length) throw new Error('insights stored nothing');
+
+    // repertoire quiz
+    newGame();
+    board.orientation = 'w';
+    for (const [a, b] of [['e2', 'e4'], ['e7', 'e5'], ['g1', 'f3'], ['b8', 'c6'], ['f1', 'b5']]) addMove(a, b);
+    addRepLine();
+    startDrill();
+    handleBoardMove('d2', 'd4');
+    const wrongMsg = drill.msg;
+    handleBoardMove('e2', 'e4');
+    await new Promise((r) => setTimeout(r, 700));
+    handleBoardMove('g1', 'f3');
+    await new Promise((r) => setTimeout(r, 700));
+    handleBoardMove('f1', 'b5');
+    await new Promise((r) => setTimeout(r, 700));
+    await log(`repertoire: "${loadRep()[0].name}"; wrong try -> ${wrongMsg.replace(/<[^>]+>/g, '')}; end state ${drill.state}, moves ${mainline().map((n) => n.move.san).join(' ')}`);
+    if (drill.state !== 'solved') throw new Error('repertoire line was not completed');
+    exitDrill();
+
+    // engine update check
+    const upd = await invoke('check_updates');
+    await log(`update check: ${upd.length ? upd.map((u) => u.join(' -> ')).join(', ') : 'everything up to date'}`);
+
     await log('OK');
     await invoke('quit', { code: 0 });
   } catch (e) {
     await log(`FAILED: ${e.message || e}`);
+    if (e.stack) await log(String(e.stack).split('\n').slice(0, 6).join(' <- '));
     await invoke('quit', { code: 1 });
   }
 }
 
 // ---------------------------------------------------------------- start
 async function main() {
+  applyLayout();
   board = new Board($('board'), { onMove: handleBoardMove });
   newGame();
   wire();
@@ -1624,6 +2126,24 @@ async function main() {
   fetch('data/openings.json').then((r) => r.json()).then((o) => { openings = o; renderOpening(); analyze(); }).catch(() => {});
 
   const sys = await invoke('system_info');
+  if (sys.args.includes('--test')) {
+    // Logic tests only: no engine is started and the window stays hidden.
+    settings.autoReview = false;
+    settings.sound = false;
+    const log = (line) => invoke('log_line', { line });
+    try {
+      openings = await fetch('data/openings.json').then((r) => r.json());
+      const { runTests } = await import('./tests.js');
+      const { count, failures } = await runTests({ loadPgn, loadText, toPgn, mainline, goto, playMove });
+      for (const f of failures) await log(`FAIL  ${f}`);
+      await log(`${count - failures.length} of ${count} tests passed`);
+      await invoke('quit', { code: failures.length ? 1 : 0 });
+    } catch (e) {
+      await log(`Tests could not run: ${e.message || e}`);
+      await invoke('quit', { code: 2 });
+    }
+    return;
+  }
   if (!hadSaved) {
     settings.threads = Math.max(1, Math.min(8, Math.floor(sys.threads / 2)));
     $('set-threads').value = settings.threads;
