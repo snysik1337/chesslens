@@ -264,6 +264,27 @@ export async function runTests(app) {
     ok(c.moves[0] === a.moves[0], 'earlier grade changed');
   });
 
+  test('en passant: playable on the board, removes the pawn, survives PGN export', () => {
+    app.loadPgn('1. e4 a6 2. e5 d5 *');
+    app.goto(app.mainline()[3]);
+    app.playMove('e5', 'd6');
+    const n = app.mainline()[4];
+    eq(n.move.san, 'exd6');
+    ok(n.move.flags.includes('e'), 'not flagged as en passant');
+    eq(n.fen.split(' ')[0], 'rnbqkbnr/1pp1pppp/p2P4/8/8/8/PPPP1PPP/RNBQKBNR', 'captured pawn still on d5');
+    eq(material(n.fen).diff, 1);
+    ok(app.toPgn().includes('3. exd6'), 'missing from export');
+    // Not available a move later.
+    app.loadPgn('1. e4 a6 2. e5 d5 3. a3 a5 *');
+    app.goto(app.mainline()[5]);
+    app.playMove('e5', 'd6');
+    eq(app.mainline().length, 6, 'late en passant was accepted');
+    // A pasted FEN keeps its en passant square.
+    app.loadText('rnbqkbnr/1pp1pppp/p7/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3');
+    app.playMove('e5', 'd6');
+    eq(app.mainline()[0].move.san, 'exd6');
+  });
+
   const decoded = await app.preloadSounds();
   test('the four recorded sounds load and decode', () => eq(decoded, 4));
 
