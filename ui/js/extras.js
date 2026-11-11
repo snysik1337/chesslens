@@ -2,46 +2,55 @@
 // and the position editor's FEN handling.
 
 // ---------------------------------------------------------------- sounds (synthesised, no audio files)
+// Soft, rounded tones: sine waves with a gentle attack and a low-pass filter, kept quiet.
 let audio = null;
-function ctx() {
-  if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+let master = null;
+let volume = 0.6;
+
+export function setVolume(v) {
+  volume = Math.max(0, Math.min(1, v));
+  if (master) master.gain.value = volume;
+}
+
+function out() {
+  if (!audio) {
+    audio = new (window.AudioContext || window.webkitAudioContext)();
+    const soften = audio.createBiquadFilter();
+    soften.type = 'lowpass';
+    soften.frequency.value = 1800;
+    master = audio.createGain();
+    master.gain.value = volume;
+    soften.connect(master).connect(audio.destination);
+    audio.entry = soften;
+  }
   if (audio.state === 'suspended') audio.resume();
   return audio;
 }
-function tone(freq, dur, { type = 'sine', gain = 0.18, at = 0 } = {}) {
-  const c = ctx(), t = c.currentTime + at;
+
+/** One soft note. `drop` glides the pitch down a little, which reads as a muted wooden tap. */
+function note(freq, dur, { gain = 0.1, at = 0, drop = 0, type = 'sine' } = {}) {
+  const c = out(), t = c.currentTime + at;
   const o = c.createOscillator(), g = c.createGain();
   o.type = type;
   o.frequency.setValueAtTime(freq, t);
-  g.gain.setValueAtTime(gain, t);
+  if (drop) o.frequency.exponentialRampToValueAtTime(freq * (1 - drop), t + dur);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(gain, t + 0.012);            // no click at the start
   g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  o.connect(g).connect(c.destination);
+  o.connect(g).connect(c.entry);
   o.start(t);
-  o.stop(t + dur);
+  o.stop(t + dur + 0.02);
 }
-function knock(freq, dur, { gain = 0.5, at = 0 } = {}) {
-  const c = ctx(), t = c.currentTime + at;
-  const len = Math.floor(c.sampleRate * dur);
-  const buf = c.createBuffer(1, len, c.sampleRate);
-  const d = buf.getChannelData(0);
-  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 2;
-  const src = c.createBufferSource(), f = c.createBiquadFilter(), g = c.createGain();
-  src.buffer = buf;
-  f.type = 'bandpass';
-  f.frequency.value = freq;
-  f.Q.value = 1.2;
-  g.gain.value = gain;
-  src.connect(f).connect(g).connect(c.destination);
-  src.start(t);
-}
+
+const tap = (at = 0, freq = 196) => { note(freq, 0.16, { gain: 0.11, at, drop: 0.25 }); note(freq * 2, 0.08, { gain: 0.03, at }); };
 const SOUNDS = {
-  move: () => { knock(700, 0.06); tone(170, 0.07, { gain: 0.12 }); },
-  capture: () => { knock(1500, 0.05, { gain: 0.7 }); knock(500, 0.09, { at: 0.02 }); tone(110, 0.1, { gain: 0.15 }); },
-  castle: () => { SOUNDS.move(); knock(700, 0.06, { at: 0.11 }); tone(170, 0.07, { gain: 0.12, at: 0.11 }); },
-  check: () => { SOUNDS.move(); tone(880, 0.14, { type: 'triangle', gain: 0.1, at: 0.03 }); },
-  end: () => { [523, 659, 784].forEach((f, i) => tone(f, 0.28, { type: 'triangle', gain: 0.12, at: i * 0.11 })); },
-  right: () => { tone(660, 0.1, { type: 'triangle', gain: 0.12 }); tone(990, 0.16, { type: 'triangle', gain: 0.12, at: 0.09 }); },
-  wrong: () => { tone(200, 0.18, { type: 'square', gain: 0.05 }); },
+  move: () => tap(),
+  capture: () => { tap(0, 147); note(110, 0.22, { gain: 0.07, at: 0.03, drop: 0.2 }); },
+  castle: () => { tap(); tap(0.13, 175); },
+  check: () => { tap(); note(587, 0.5, { gain: 0.035, at: 0.04 }); },
+  end: () => { [262, 330, 392].forEach((f, i) => note(f, 1.1, { gain: 0.05, at: i * 0.14 })); },
+  right: () => { note(523, 0.35, { gain: 0.05 }); note(659, 0.5, { gain: 0.05, at: 0.12 }); },
+  wrong: () => { note(196, 0.3, { gain: 0.06, drop: 0.12 }); },
 };
 export function playSound(name) {
   try { SOUNDS[name]?.(); } catch { /* no audio device */ }

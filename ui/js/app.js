@@ -3,7 +3,7 @@ import { invoke, listen, isDesktop } from './backend.js';
 import { Engine } from './engine.js';
 import { Board } from './board.js';
 import { CLASSES, CLASS_ORDER, PHASES, winPct, fmtScore, pvToSan, reviewGame, summarize, openingKey, uciToMove } from './review.js';
-import { playSound, soundForMove, material, parseClock, clockSeconds, estimateRating, fenToPieces, piecesToFen } from './extras.js';
+import { playSound, setVolume, soundForMove, material, parseClock, clockSeconds, estimateRating, fenToPieces, piecesToFen } from './extras.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -27,7 +27,7 @@ const defaults = {
   boardTheme: 'green', pieceSet: 'cburnett', coords: true, arrow: true, legal: true,
   threads: 2, hash: 256, multipv: 3, liveDepth: 24, reviewDepth: 16,
   engineId: null, engineOn: true, engineOpts: {}, autoReview: true,
-  anim: true, sound: true, book: true, playLevel: 2,
+  anim: true, sound: true, volume: 60, book: true, playLevel: 2,
   threats: false, panelW: 440, updates: {}, updCheck: 0,
 };
 let settings = { ...defaults };
@@ -2034,6 +2034,10 @@ function wire() {
     const b = e.target.closest('[data-set]');
     if (b) { settings.pieceSet = b.dataset.set; save(); renderSettings(); renderBoard(); }
   });
+  setVolume(settings.volume / 100);
+  $('set-volume').value = settings.volume;
+  $('set-volume').oninput = (e) => { settings.volume = Number(e.target.value); setVolume(settings.volume / 100); save(); };
+  $('set-volume').onchange = () => { if (settings.sound) playSound('move'); };
   $('set-auto').onchange = (e) => { settings.autoReview = e.target.checked; save(); analyze(); };
   for (const [id, key] of [['set-coords', 'coords'], ['set-arrow', 'arrow'], ['set-legal', 'legal'], ['set-anim', 'anim'], ['set-sound', 'sound'], ['set-book', 'book']]) {
     $(id).checked = settings[key];
