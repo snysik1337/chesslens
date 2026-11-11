@@ -93,6 +93,39 @@ export async function runTests(app) {
     }), opera, null);
     eq(r.moves[30].cls, 'best');
   });
+  test('Brilliant needs a real sacrifice: a knight for two pawns is not one', () => {
+    const r = reviewGame(sparse({
+      18: pos(opera[18].before, ['c3b5', 250], ['c4d3', 100]),
+      19: pos(opera[19].before, ['c6b5', 250]),
+    }), opera, null);
+    eq(r.moves[18].cls, 'best', '10. Nxb5');
+  });
+  test('material won back within the main line is a combination, not Brilliant', () => {
+    const next = pos(opera[25].before, ['d8d7', 600]);
+    next.lines[0].pv = ['d8d7', 'h1d1', 'e7e6', 'b5d7', 'f6d7'];
+    const r = reviewGame(sparse({ 24: pos(opera[24].before, ['d1d7', 600], ['h1e1', 300]), 25: next }), opera, null);
+    ok(r.moves[24].cls !== 'brilliant', `13. Rxd7 graded ${r.moves[24].cls}`);
+    // The same offer with no way to win the material back stays Brilliant.
+    const kept = pos(opera[25].before, ['d8d7', 600]);
+    kept.lines[0].pv = ['d8d7', 'h1d1', 'e7e6', 'c1b1', 'a7a6'];
+    const r2 = reviewGame(sparse({ 24: pos(opera[24].before, ['d1d7', 600], ['h1e1', 300]), 25: kept }), opera, null);
+    eq(r2.moves[24].cls, 'brilliant', 'unrecovered exchange sacrifice');
+    ok(r2.moves[24].text.includes('rook on d7'), `text: ${r2.moves[24].text}`);
+  });
+  test('a sacrifice no better than the safe move is not Brilliant', () => {
+    const r = reviewGame(sparse({
+      30: pos(opera[30].before, ['b3b8', 500], ['b3c3', 480]),
+      31: pos(opera[31].before, ['d7b8', 500]),
+    }), opera, null);
+    eq(r.moves[30].cls, 'best');
+  });
+  test('a piece that was lost anyway and sells itself is not Brilliant', () => {
+    // White knight on a7 is attacked by the rook and cannot be saved; Nxc6 gives it up for a pawn.
+    const h = history('[SetUp "1"]\n[FEN "r3k3/N7/2p5/8/8/8/8/4K3 w - - 0 1"]\n\n1. Nxc6 Rc8 *');
+    const r = reviewGame([pos(h[0].before, ['a7c6', -300], ['a7b5', -420]), pos(h[1].before, ['a8c8', -300]), null], h, null);
+    ok(r.moves[0].cls !== 'brilliant', `graded ${r.moves[0].cls}`);
+  });
+
   test('the only move that holds is Great; an ordinary best move is Best', () => {
     const at = (second) => reviewGame(sparse({
       12: pos(opera[12].before, ['f3b3', 180], ['c4b3', second]),

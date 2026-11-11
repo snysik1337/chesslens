@@ -75,27 +75,61 @@ function exchangeGain(chess, sq) {
   return Math.max(0, gain);
 }
 
+/** Material the opponent could already win on `sq` if it were their move (0 when unknown). */
+function alreadyLosing(fen, sq) {
+  const f = fen.split(' ');
+  f[1] = f[1] === 'w' ? 'b' : 'w';
+  f[3] = '-';
+  try { return exchangeGain(new Chess(f.join(' ')), sq); } catch { return 0; }
+}
+
 /**
- * True when the move offers material: the moved piece can be won for less than it is
- * worth (a knight for two pawns counts), or another piece is left to be taken.
+ * The real sacrifice a move makes, or null: { square, piece, offer }. `offer` is the
+ * material the opponent can win at once, net of anything the move captured, and must be
+ * worth at least two pawns. A piece that was lost anyway and sells itself does not count.
  */
-function isSacrifice(move, { inCheck = false, prevOwn = null } = {}) {
-  if (move.promotion) return false;
+function findSacrifice(move, { inCheck = false, prevOwn = null } = {}) {
+  if (move.promotion) return null;
   const after = new Chess(move.after);
-  if (after.isCheckmate()) return false;
+  if (after.isCheckmate()) return null;
   const taken = move.captured ? VALUE[move.captured] : 0;
-  if (move.piece !== 'p' && move.piece !== 'k' && exchangeGain(after, move.to) - taken >= 1) return true;
+  if (move.piece !== 'p' && move.piece !== 'k') {
+    const offer = exchangeGain(after, move.to) - taken;
+    if (offer >= 2 && alreadyLosing(move.before, move.from) < offer) return { square: move.to, piece: move.piece, offer };
+  }
   // Answering a check, or leaving the piece that just captured to be retaken, is not an offer.
-  if (inCheck) return false;
-  let other = 0;
+  if (inCheck) return null;
+  let best = null;
   const seen = new Set([move.to]);
   if (prevOwn && prevOwn.captured) seen.add(prevOwn.to);
   for (const m of after.moves({ verbose: true })) {
     if (!m.captured || m.captured === 'p' || seen.has(m.to)) continue;
     seen.add(m.to);
-    other = Math.max(other, exchangeGain(after, m.to));
+    const offer = exchangeGain(after, m.to) - taken;
+    if (offer >= 2 && (!best || offer > best.offer)) best = { square: m.to, piece: m.captured, offer };
   }
-  return other - taken >= 2;
+  return best;
+}
+
+/**
+ * True when the opponent takes the offered piece in the engine's main line and the
+ * material is back within the next few moves: a combination, not a sacrifice.
+ */
+function regainsMaterial(move, next, sac) {
+  const pv = next.lines[0] ? next.lines[0].pv : [];
+  if (pv.length < 3) return false;
+  const c = new Chess(move.after);
+  let balance = move.captured ? VALUE[move.captured] : 0;
+  for (let k = 0; k < Math.min(5, pv.length); k++) {
+    let m;
+    try { m = c.move({ from: pv[k].slice(0, 2), to: pv[k].slice(2, 4), promotion: pv[k][4] }); } catch { return false; }
+    if (k === 0 && !(m.captured && m.to === sac.square)) return false;   // declined: the offer stands
+    const sign = m.color === move.color ? 1 : -1;
+    if (m.captured) balance += sign * VALUE[m.captured];
+    if (m.promotion) balance += sign * 8;
+    if (c.isCheckmate()) return false;
+  }
+  return balance >= 0;
 }
 
 /** A capture that simply wins material: taking a piece that is not defended well enough. */
@@ -172,7 +206,7 @@ export function reviewGame(positions, moves, openings) {
 
     const moverMate = (s) => s && s.mate !== undefined
       && (s.mate === 0 ? s.winner === mv.color : white ? s.mate > 0 : s.mate < 0);
-    let cls;
+    let cls, sac = null;
     if (book) cls = 'book';
     else if (legalCount === 1) cls = 'forced';
     else if (next.terminal === 'checkmate') cls = 'best';
@@ -194,17 +228,23 @@ export function reviewGame(positions, moves, openings) {
 
       if (isBest || loss <= 1.5) {
         const secondPov = second ? pov(second) : null;
-        const alreadyWinning = secondPov !== null && secondPov >= 97;
+        const alreadyWinning = secondPov !== null && secondPov >= 90;
         const recapture = i > 0 && moves[i - 1].captured && moves[i - 1].to === mv.to;
+        // Brilliant is reserved for a real sacrifice that is the engine's choice, is clearly
+        // better than the safe alternative (or mates), and is not just a quick combination.
         const context = { inCheck: i > 0 && /[+#]/.test(moves[i - 1].san), prevOwn: i > 1 ? moves[i - 2] : null };
-        if (isSacrifice(mv, context) && after >= 45 && !alreadyWinning) cls = 'brilliant';
+        const exact = isBest || loss <= 0.5;
+        const needed = secondPov === null || before - secondPov >= 3 || moverMate(next.score);
+        sac = exact && after >= 50 && !alreadyWinning && needed ? findSacrifice(mv, context) : null;
+        if (sac && regainsMaterial(mv, next, sac)) sac = null;
+        if (sac) cls = 'brilliant';
         else if (secondPov !== null && before - secondPov >= 15 && secondPov < 85 && !recapture && legalCount > 2
           && before >= 25 && !isObviousCapture(mv)) cls = 'great';
       }
     }
 
     out.push({
-      cls, loss, acc: accuracyOf(loss), isBest, phase,
+      cls, loss, acc: accuracyOf(loss), isBest, phase, sac,
       bestUci, bestSan: bestMove ? bestMove.san : null,
       scoreBefore: pos?.score, scoreAfter: next?.score,
       text: '',
@@ -265,7 +305,18 @@ function explain(r, mv, pos, next, white, opening) {
     : '';
 
   switch (r.cls) {
-    case 'brilliant': return `${san} is brilliant! It gives up material, and the sacrifice holds up.`;
+    case 'brilliant': {
+      const what = r.sac ? `offers the ${PIECE_NAME[r.sac.piece]} on ${r.sac.square}` : 'gives up material';
+      if (moverMate(next.score)) return `${san} is brilliant! It ${what} and forces mate in ${Math.abs(next.score.mate)}.`;
+      const line = next.lines[0];
+      const reply = line && uciToMove(mv.after, line.pv[0]);
+      if (reply && r.sac && reply.captured && reply.to === r.sac.square) {
+        const follow = pvToSan(mv.after, line.pv, 2)[1];
+        const keeps = winPctFor(r.scoreAfter, white) >= 60 ? 'keeps the advantage' : 'holds the balance';
+        return `${san} is brilliant! It ${what}. After ${reply.san}${follow ? `, ${follow} ${keeps}` : ' the compensation is worth more'}.`;
+      }
+      return `${san} is brilliant! It ${what}, and taking it only makes things worse.`;
+    }
     case 'great': return `${san} is a great move. It was the only move that kept ${r.scoreAfter && winPctFor(r.scoreAfter, white) >= 60 ? 'the advantage' : 'the position together'}.`;
     case 'best': return next.terminal === 'checkmate' ? `${san} is checkmate.` : `${san} is the best move.`;
     case 'excellent': return `${san} is an excellent move.${alt ? ` The engine slightly prefers ${alt}.` : ''}`;
