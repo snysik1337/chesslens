@@ -57,6 +57,7 @@ let batch = null;      // { done, total, cancel }: background review of many gam
 let preview = null;    // { line, k }: engine-line move being hovered
 let lastShown = null;  // node the board last displayed, for animation and sound
 let skipAnim = false;
+let playStopping = null;  // promise while a finished game is giving the engine back
 
 function newGame(fen = START, headers = {}) {
   if (reviewing) { reviewCancelled = true; engine.stop(); }
@@ -64,7 +65,7 @@ function newGame(fen = START, headers = {}) {
   drill = null;
   preview = null;
   lastShown = null;
-  if (play) stopPlay();
+  if (play) playStopping = stopPlay().finally(() => { playStopping = null; });
   nodes.clear();
   const [, turn, , , , full] = fen.split(' ');
   game.startPly = (Number(full || 1) - 1) * 2 + (turn === 'b' ? 1 : 0);
@@ -190,12 +191,31 @@ function toPgn({ annotate = false } = {}) {
   return `${head}${head ? '\n\n' : ''}${body} ${h.Result || '*'}`.trim() + '\n';
 }
 
+/** Why a FEN cannot be analysed, or null when it is a legal position. */
+function positionError(fen) {
+  const v = validateFen(fen);
+  if (!v.ok) return v.error;
+  try {
+    const c = new Chess(fen);
+    const mover = c.turn();
+    for (const row of c.board()) {
+      for (const p of row) {
+        if (p && p.type === 'k' && p.color !== mover && c.isAttacked(p.square, mover)) {
+          return `${mover === 'w' ? 'Black' : 'White'} is in check but it is ${mover === 'w' ? 'White' : 'Black'} to move`;
+        }
+      }
+    }
+  } catch (e) {
+    return e.message || String(e);
+  }
+  return null;
+}
+
 function terminalInfo(fen) {
   const c = new Chess(fen);
   if (c.isCheckmate()) return { terminal: 'checkmate', text: 'Checkmate', score: { mate: 0, winner: c.turn() === 'w' ? 'b' : 'w' } };
   if (c.isStalemate()) return { terminal: 'draw', text: 'Stalemate', score: { cp: 0 } };
   if (c.isInsufficientMaterial()) return { terminal: 'draw', text: 'Draw by insufficient material', score: { cp: 0 } };
-  if (Number(fen.split(' ')[4]) >= 100) return { terminal: 'draw', text: 'Draw by the fifty-move rule', score: { cp: 0 } };
   if (!c.moves().length) return { terminal: 'draw', text: 'Draw', score: { cp: 0 } };
   return null;
 }
@@ -210,6 +230,21 @@ let reviewCancelled = false;
 let live = { node: null, lines: [], depth: 0 };
 let liveToken = 0;
 let liveFrame = 0;
+
+/** Engine options changed during a review, Insights or a game; applied once the engine is free. */
+const pendingOptions = new Map();
+function engineBusy() {
+  return reviewing ? 'the review' : batch ? 'Insights' : play ? 'the game' : null;
+}
+async function setEngineOption(name, value) {
+  const busy = engineBusy();
+  if (busy) {
+    pendingOptions.set(name, value);
+    toast(`This takes effect when ${busy} is finished.`);
+    return;
+  }
+  await engine.configure(name, value);
+}
 
 // Depth at which a live evaluation is good enough to grade a move.
 const CLASSIFY_DEPTH = 14;
@@ -274,6 +309,16 @@ async function analyze() {
   preview = null;
   if (reviewing || batch) { if (batch) renderLive(); return; }
   if (retry || play || drill) { renderLive(); return; }
+  if (playStopping) {
+    await playStopping;
+    if (token !== liveToken) return;
+  }
+  // Engine settings changed while the engine was busy are applied now.
+  if (pendingOptions.size && engine.ready) {
+    for (const [name, value] of pendingOptions) await engine.configure(name, value);
+    pendingOptions.clear();
+    if (token !== liveToken) return;
+  }
   if (!node.rev && classifyAround(node)) renderQuality();
   const usable = settings.engineOn && engine.ready;
 
@@ -321,7 +366,7 @@ async function analyze() {
       live.lines = lines.filter(Boolean);
       live.depth = job.depth;
       const settled = live.lines.length >= Math.min(2, legal) && live.lines.every((l) => l.depth === job.depth);
-      if (settings.autoReview && !node.cache && settled && job.depth >= CLASSIFY_DEPTH) {
+      if (settings.autoReview && !node.cache && settled && job.depth >= Math.min(CLASSIFY_DEPTH, settings.liveDepth)) {
         node.cache = { fen: node.fen, score: live.lines[0], lines: live.lines.map((l) => ({ ...l })), depth: job.depth };
         if (classifyAround(node)) renderQuality();
       }
@@ -351,7 +396,9 @@ function renderLive() {
     el.innerHTML = `<div class="msg">${esc(term.text)}</div>`;
     $('engine-depth').textContent = '';
   } else if (!engine.ready) {
-    el.innerHTML = engines.length ? '<div class="msg">Starting engine…</div>' : '';
+    el.innerHTML = !engines.length ? ''
+      : engineDown ? '<div class="msg">The engine keeps stopping. <button class="btn" data-restart="1">Restart engine</button></div>'
+        : '<div class="msg">Starting engine…</div>';
     $('engine-depth').textContent = '';
   } else if (batch) {
     el.innerHTML = `<div class="msg">Analysing your games for Insights… ${batch.done} of ${batch.total}</div>`;
@@ -404,9 +451,35 @@ function renderEvalBar() {
     : Math.abs(score.cp / 100).toFixed(1);
 }
 
+let engineExits = [];
+let engineDown = false;
+
+/** The engine process ended or stopped answering: start it again, unless it keeps failing. */
+function handleEngineExit() {
+  engine.ready = false;
+  const now = Date.now();
+  engineExits = engineExits.filter((t) => now - t < 20000);
+  engineExits.push(now);
+  if (!engines.some((e) => e.id === settings.engineId)) { renderLive(); return; }
+  if (engineExits.length > 2) {
+    engineDown = true;
+    renderLive();
+    toast('The engine stopped three times in a row. It may not cope with this position.', true);
+    return;
+  }
+  activateEngine(settings.engineId);
+}
+
 async function activateEngine(id) {
   const info = engines.find((e) => e.id === id);
   if (!info) return;
+  // Swapping engines under a running review, Insights batch or game would break it.
+  const busy = engineBusy();
+  if (busy && engine.ready && engine.info && engine.info.id !== id) {
+    toast(`Finish ${busy} before switching engines.`);
+    renderEngines();
+    return;
+  }
   settings.engineId = id;
   save();
   renderEngines();
@@ -417,6 +490,7 @@ async function activateEngine(id) {
     toast(`${info.name} failed to start: ${e}`, true);
     return;
   }
+  engineDown = false;
   renderEngines();
   renderAdvanced();
   analyze();
@@ -509,6 +583,7 @@ async function cancelReview() {
 /** Reviews the whole main line. A second call while one is running joins it. */
 function runReview() {
   if (reviewing) return reviewPromise;
+  if (batch || play) { toast(`Wait until ${engineBusy()} is finished.`); return Promise.resolve(null); }
   const main = mainline();
   if (!main.length) { toast('Load a game or play some moves first.'); return Promise.resolve(null); }
   if (!engine.ready) { toast('Install or choose an engine first.'); showTab('engines'); return Promise.resolve(null); }
@@ -597,6 +672,7 @@ function timeChart() {
   const spent = timeSpent();
   if (!spent) return '';
   const main = mainline();
+  if (!spent.some((x) => x > 0)) return '';
   const max = Math.max(1, ...spent.map((x) => x || 0));
   const bars = spent.map((x, i) => {
     if (!x) return '';
@@ -970,7 +1046,7 @@ function retryItems(color) {
 }
 
 function startRetry(items) {
-  if (reviewing) { toast('Wait for the review to finish first.'); return; }
+  if (reviewing || batch) { toast(`Wait until ${engineBusy()} is finished.`); return; }
   if (!items.length) { toast('No mistakes to retry.'); return; }
   if (engine.ready) engine.stop();
   retry = { items, idx: 0, found: 0 };
@@ -1053,6 +1129,7 @@ const LEVELS = [
 
 async function startPlay() {
   if (!engine.ready) { toast('Install or choose an engine first.'); showTab('engines'); return; }
+  if (batch) { toast('Wait until Insights is finished.'); return; }
   await cancelReview();
   let color = $('play-side').value;
   if (color === 'r') color = Math.random() < 0.5 ? 'w' : 'b';
@@ -1094,7 +1171,9 @@ function gameOver() {
   if (term) return term;
   const c = new Chess(game.root.fen);
   for (const n of mainline()) c.move(n.move.san);
-  return c.isThreefoldRepetition() ? { terminal: 'draw', text: 'Draw by repetition', score: { cp: 0 } } : null;
+  if (c.isThreefoldRepetition()) return { terminal: 'draw', text: 'Draw by repetition', score: { cp: 0 } };
+  if (Number(tip.fen.split(' ')[4]) >= 100) return { terminal: 'draw', text: 'Draw by the fifty-move rule', score: { cp: 0 } };
+  return null;
 }
 
 async function endPlay(result, text) {
@@ -1248,7 +1327,7 @@ function renderRep() {
 }
 
 function startDrill(color, id) {
-  if (play) { toast('Finish or resign the current game first.'); return; }
+  if (play || batch) { toast(play ? 'Finish or resign the current game first.' : 'Wait until Insights is finished.'); return; }
   let items = loadRep().filter((l) => (id ? String(l.id) === String(id) : !color || l.color === color));
   if (!items.length) { toast('There are no repertoire lines to train yet.'); return; }
   items = items.map((l) => [Math.random(), l]).sort((a, b) => a[0] - b[0]).map((x) => x[1]);
@@ -1516,11 +1595,11 @@ function renderEditor() {
   $('editor-palette').innerHTML = ['w', 'b'].flatMap((c) => [...'KQRBNP'].map((t) => c + t))
     .map((p) => `<button data-tool="${p}" class="${ed.tool === p ? 'on' : ''}" style="background-image:url(pieces/${settings.pieceSet}/${p}.svg)"></button>`).join('') +
     `<button data-tool="x" class="erase${ed.tool === 'x' ? ' on' : ''}">Eraser</button>`;
-  const fen = editorFen(), v = validateFen(fen);
+  const fen = editorFen(), bad = positionError(fen);
   const el = $('editor-fen');
-  el.textContent = v.ok ? fen : `Not a legal position yet: ${v.error}`;
-  el.className = `status${v.ok ? '' : ' err'}`;
-  $('editor-ok').disabled = !v.ok;
+  el.textContent = bad ? `Not a legal position yet: ${bad}` : fen;
+  el.className = `status${bad ? ' err' : ''}`;
+  $('editor-ok').disabled = !!bad;
 }
 
 function openEditor() {
@@ -1574,6 +1653,8 @@ function loadText(text) {
   text = text.trim();
   if (!text) return;
   if (validateFen(text).ok) {
+    const bad = positionError(text);
+    if (bad) { setStatus('games-status', `That position is not legal: ${bad}.`, true); return; }
     newGame(text);
     renderAll();
     analyze();
@@ -1664,6 +1745,7 @@ function wire() {
   });
   // Clicking a move in an engine line plays the line up to that move; hovering previews it.
   $('lines').addEventListener('click', (e) => {
+    if (e.target.dataset.restart) { engineExits = []; engineDown = false; renderLive(); activateEngine(settings.engineId); return; }
     const { line, k } = e.target.dataset;
     if (line === undefined || live.node !== game.current || !live.lines[line]) return;
     const pv = live.lines[line].pv.slice(0, Number(k) + 1);
@@ -1762,7 +1844,7 @@ function wire() {
   $('editor-cancel').onclick = () => { $('editor').hidden = true; };
   $('editor-ok').onclick = () => {
     const fen = editorFen();
-    if (!validateFen(fen).ok) return;
+    if (positionError(fen)) return;
     $('editor').hidden = true;
     newGame(fen);
     renderAll();
@@ -1843,6 +1925,7 @@ function wire() {
     const { use, remove } = e.target.dataset;
     if (use) activateEngine(use);
     if (remove) {
+      if (engineBusy()) { toast(`Wait until ${engineBusy()} is finished.`); return; }
       await invoke('remove_engine', { id: remove }).catch((err) => toast(String(err), true));
       if (remove === settings.engineId) { engine.ready = false; engine.info = null; }
       await refreshEngines();
@@ -1858,8 +1941,8 @@ function wire() {
       el.value = v;
       settings[key] = v;
       save();
-      if (uci && !reviewing) await engine.configure(uci, v);
-      if (!reviewing) analyze();
+      if (uci) await setEngineOption(uci, v);
+      if (!engineBusy()) analyze();
     };
   };
   num('set-threads', 'threads', 'Threads', 1, 512);
@@ -1875,12 +1958,11 @@ function wire() {
     const id = engine.info.id;
     settings.engineOpts[id] = { ...(settings.engineOpts[id] || {}), [o.name]: v };
     save();
-    if (reviewing) return;
-    await engine.configure(o.name, v === '' ? '<empty>' : v);
-    analyze();
+    await setEngineOption(o.name, v === '' ? '<empty>' : v);
+    if (!engineBusy()) analyze();
   });
   $('advanced-body').addEventListener('click', async (e) => {
-    if (e.target.id === 'adv-reset' && engine.ready) {
+    if (e.target.id === 'adv-reset' && engine.ready && !engineBusy()) {
       delete settings.engineOpts[engine.info.id];
       save();
       await activateEngine(engine.info.id);
@@ -1888,7 +1970,7 @@ function wire() {
       return;
     }
     const i = e.target.dataset.opt;
-    if (e.target.tagName !== 'BUTTON' || i === undefined || !engine.ready || reviewing) return;
+    if (e.target.tagName !== 'BUTTON' || i === undefined || !engine.ready || engineBusy()) return;
     await engine.configure(engine.advancedOptions()[i].name);
     analyze();
   });
@@ -2103,6 +2185,47 @@ async function selfTest() {
     const upd = await invoke('check_updates');
     await log(`update check: ${upd.length ? upd.map((u) => u.join(' -> ')).join(', ') : 'everything up to date'}`);
 
+    // loading a game in the middle of a game against the engine must still start analysis
+    $('play-side').value = 'w';
+    await startPlay();
+    handleBoardMove('e2', 'e4');
+    loadPgn(OPERA);
+    goto(mainline()[9]);
+    const resumed = await waitFor(() => live.node === game.current && live.lines.length > 0, 15000);
+    await log(`analysis after loading a game mid-play: ${resumed ? 'running' : 'NOT running'}; play mode off: ${!play}`);
+    if (!resumed) throw new Error('analysis did not start after loading a game during play');
+
+    // grading still happens when live depth is below the usual grading depth
+    settings.autoReview = true;
+    settings.liveDepth = 10;
+    newGame();
+    renderAll();
+    for (const [a, b] of [['a2', 'a3'], ['a7', 'a5'], ['h2', 'h3'], ['h7', 'h5'], ['g2', 'g4']]) { playMove(a, b); await new Promise((r) => setTimeout(r, 50)); }
+    const graded = await waitFor(() => !!game.current.rev, 20000);
+    await log(`grading at live depth 10: ${graded ? game.current.rev.cls : 'NOT graded'}`);
+    if (!graded) throw new Error('move was not graded at live depth 10');
+    settings.autoReview = false;
+
+    // a setting changed during a review is deferred, not allowed to cancel it
+    loadPgn(OPERA);
+    const rv = runReview();
+    await new Promise((r) => setTimeout(r, 300));
+    await setEngineOption('Threads', settings.threads);
+    const r4 = await rv;
+    await log(`review with a setting changed mid-way: ${r4 ? 'completed' : 'CANCELLED'}; deferred options: ${pendingOptions.size}`);
+    if (!r4) throw new Error('changing a setting cancelled the review');
+
+    // the engine process dying is recovered from
+    await invoke('engine_stop');
+    await waitFor(() => !engine.ready, 5000);
+    const back = await waitFor(() => engine.ready, 20000);
+    await log(`engine restarted after its process ended: ${back}`);
+    if (!back) throw new Error('engine was not restarted');
+    goto(mainline()[5]);
+    const alive = await waitFor(() => live.node === game.current && live.lines.length > 0, 15000);
+    await log(`analysis after restart: ${alive ? 'running' : 'NOT running'}`);
+    if (!alive) throw new Error('no analysis after engine restart');
+
     await log('OK');
     await invoke('quit', { code: 0 });
   } catch (e) {
@@ -2134,7 +2257,7 @@ async function main() {
     try {
       openings = await fetch('data/openings.json').then((r) => r.json());
       const { runTests } = await import('./tests.js');
-      const { count, failures } = await runTests({ loadPgn, loadText, toPgn, mainline, goto, playMove });
+      const { count, failures } = await runTests({ loadPgn, loadText, toPgn, mainline, goto, playMove, positionError, timeChart, terminalInfo });
       for (const f of failures) await log(`FAIL  ${f}`);
       await log(`${count - failures.length} of ${count} tests passed`);
       await invoke('quit', { code: failures.length ? 1 : 0 });
@@ -2150,7 +2273,7 @@ async function main() {
     save();
   }
   await engine.init();
-  engine.onExit = () => { renderLive(); };
+  engine.onExit = handleEngineExit;
   await listen('install-progress', onInstallProgress);
   catalog = await invoke('catalog');
   try { await refreshEngines(); } catch (e) { toast(String(e), true); }
@@ -2161,6 +2284,6 @@ async function main() {
 }
 
 // Handles for debugging from the web inspector.
-window.chesslens = { engine, game, runReview, loadPgn, settings, mainline, startRetry, retryItems, startPlay, toPgn, fetchGames, state: () => ({ retry, play, gameList }) };
+window.chesslens = { engine, game, runReview, loadPgn, loadText, positionError, timeChart, settings, mainline, startRetry, retryItems, startPlay, toPgn, fetchGames, state: () => ({ retry, play, gameList }) };
 
 main();

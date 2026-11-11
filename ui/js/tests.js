@@ -194,5 +194,42 @@ export async function runTests(app) {
     ok(out.includes('[SetUp "1"]') && out.includes('1. e4 *'), `export: ${out}`);
   });
 
+  // ------------------------------------------------------------ regressions
+  test('positions with the wrong side in check are rejected', () => {
+    eq(app.positionError(START), null);
+    ok(app.positionError('4k3/8/8/8/8/8/8/4RK2 w - - 0 1'), 'accepted Black in check with White to move');
+    eq(app.positionError('4k3/8/8/8/8/8/8/4RK2 b - - 0 1'), null, 'Black to move in check is legal');
+    ok(app.positionError('8/8/8/8/8/8/8/4K3 w - - 0 1'), 'accepted a board without a black king');
+    app.loadText(START);
+    app.loadText('4k3/8/8/8/8/8/8/4RK2 w - - 0 1');
+    eq(app.mainline().length, 0);
+  });
+  test('a high fifty-move counter does not end an imported game', () => {
+    eq(app.terminalInfo('4k3/8/8/8/8/8/R7/4K3 w - - 120 90'), null);
+    eq(app.terminalInfo('7k/5Q2/6K1/8/8/8/8/8 b - - 0 1').terminal, 'draw');
+  });
+  test('time chart copes with clocks but no usable times', () => {
+    app.loadPgn('1. e4 {[%clk 0:05:00]} e5 {[%clk 0:05:00]} *');
+    eq(app.timeChart(), '');
+    app.loadPgn('[TimeControl "300"]\n\n1. e4 {[%clk 0:04:50]} e5 {[%clk 0:04:40]} *');
+    ok(app.timeChart().includes('<rect'), 'no bars drawn');
+  });
+  test('re-grading with unchanged inputs returns the same objects', () => {
+    const h = history('1. f3 e5 2. g4 Qh4#');
+    const p = [
+      pos(h[0].before, ['e2e4', 30], ['d2d4', 25]),
+      pos(h[1].before, ['e7e5', -45], ['d7d5', -40]),
+      pos(h[2].before, ['d2d4', -45], ['e2e4', -50]),
+      null, null,
+    ];
+    const a = reviewGame(p, h, null), b = reviewGame(p, h, null);
+    ok(a.moves[0] === b.moves[0] && a.moves[1] === b.moves[1], 'grades were recomputed');
+    eq(b.moves[2], null);
+    p[3] = pos(h[3].before, ['d8h4', { mate: -1 }], ['d7d5', -150]);
+    const c = reviewGame(p, h, null);
+    eq(c.moves[2].cls, 'blunder', 'new evaluation was not picked up');
+    ok(c.moves[0] === a.moves[0], 'earlier grade changed');
+  });
+
   return { count, failures };
 }

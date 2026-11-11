@@ -160,7 +160,16 @@ export class Engine {
       const job = this.job;
       job.stopped = true;
       await this.send('stop').catch(() => {});
-      await job.promise;
+      // An engine that ignores `stop` must not block every later search.
+      const answered = await Promise.race([
+        job.promise.then(() => true),
+        new Promise((r) => setTimeout(() => r(false), 5000)),
+      ]);
+      if (!answered && this.job === job) {
+        this.ready = false;
+        this.finishJob(true);
+        if (this.onExit) this.onExit();
+      }
     }
   }
 
@@ -201,6 +210,7 @@ export class Engine {
   }
 
   async shutdown() {
+    this.gen = -1;   // the exit that follows is expected
     this.seq++;
     this.ready = false;
     this.finishJob(true);

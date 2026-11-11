@@ -154,8 +154,21 @@ export function reviewGame(positions, moves, openings) {
     if (book) opening = book;
     else inBook = false;
     const phase = phaseOf(mv.before, i, inBook);
+    // Callers re-grade the same path many times as evaluations arrive; a move whose
+    // inputs have not changed keeps its previous result.
+    const prevCls = out[i - 1] ? out[i - 1].cls : null;
+    const memo = mv.memo;
+    if (memo && memo.pos === pos && memo.next === next && memo.prevCls === prevCls && memo.book === (book || null)
+      && memo.phase === phase && memo.prevMove === (moves[i - 1] || null)) {
+      out.push(memo.result);
+      continue;
+    }
+    const remember = (result) => {
+      mv.memo = { pos, next, prevCls, book: book || null, phase, prevMove: moves[i - 1] || null, result };
+      return result;
+    };
     // Without engine evaluations only book moves can be graded.
-    if (!book && !(pos && next && pos.lines.length)) { out.push(null); continue; }
+    if (!book && !(pos && next && pos.lines.length)) { out.push(remember(null)); continue; }
 
     const moverMate = (s) => s && s.mate !== undefined
       && (s.mate === 0 ? s.winner === mv.color : white ? s.mate > 0 : s.mate < 0);
@@ -197,6 +210,7 @@ export function reviewGame(positions, moves, openings) {
       text: '',
     });
     out[i].text = explain(out[i], mv, pos, next, white, opening);
+    remember(out[i]);
   }
 
   return { moves: out, ...summarize(out, moves), opening };
