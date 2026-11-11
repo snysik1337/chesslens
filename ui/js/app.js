@@ -27,7 +27,7 @@ const defaults = {
   boardTheme: 'green', pieceSet: 'cburnett', coords: true, arrow: true, legal: true,
   threads: 2, hash: 256, multipv: 3, liveDepth: 24, reviewDepth: 16,
   engineId: null, engineOn: true, engineOpts: {}, autoReview: true,
-  anim: true, sound: true, volume: 60, soundStyle: 'wood', book: true, playLevel: 2,
+  anim: true, sound: true, volume: 60, soundSet: 'soft', book: true, playLevel: 2,
   threats: false, panelW: 440, updates: {}, updCheck: 0,
 };
 let settings = { ...defaults };
@@ -2035,9 +2035,9 @@ function wire() {
     if (b) { settings.pieceSet = b.dataset.set; save(); renderSettings(); renderBoard(); }
   });
   setVolume(settings.volume / 100);
-  setSoundStyle(settings.soundStyle);
-  $('set-soundstyle').value = settings.soundStyle;
-  $('set-soundstyle').onchange = (e) => { settings.soundStyle = e.target.value; setSoundStyle(settings.soundStyle); save(); if (settings.sound) playSound('move'); };
+  setSoundStyle(settings.soundSet);
+  $('set-soundstyle').value = settings.soundSet;
+  $('set-soundstyle').onchange = (e) => { settings.soundSet = e.target.value; setSoundStyle(settings.soundSet); save(); if (settings.sound) playSound('move'); };
   $('set-volume').value = settings.volume;
   $('set-volume').oninput = (e) => { settings.volume = Number(e.target.value); setVolume(settings.volume / 100); save(); };
   $('set-volume').onchange = () => { if (settings.sound) playSound('move'); };

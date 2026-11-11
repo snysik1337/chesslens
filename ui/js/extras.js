@@ -55,7 +55,7 @@ const SOUNDS = {
 // Recorded board sounds (see ui/sounds/LICENSES.md). Castling plays the move sound twice.
 const SAMPLE_FILES = { move: 'Move', capture: 'Capture', check: 'Check', end: 'GenericNotify' };
 const samples = {};
-let style = 'wood';   // 'wood' = recorded sounds, 'soft' = generated tones
+let style = 'soft';   // 'soft' = generated tones, 'wood' = recorded sounds
 
 export function setSoundStyle(s) { style = s; }
 
