@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chesslens</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <section class="stage">
+    <div class="evalbar" id="evalbar" title="Engine evaluation">
+      <div class="evalbar-white" id="evalbar-white"></div>
+      <span class="evalbar-num" id="evalbar-num">0.0</span>
+    </div>
+    <div class="board-col">
+      <div class="player" id="player-top"></div>
+      <div class="board" id="board"></div>
+      <div class="player" id="player-bottom"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <nav class="tabs" id="tabs">
+      <button data-tab="analysis" class="active">Analysis</button>
+      <button data-tab="review">Review</button>
+      <button data-tab="games">Games</button>
+      <button data-tab="play">Play</button>
+      <button data-tab="engines">Engines</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+
+    <div class="tab-body" id="tab-analysis">
+      <div class="engine-head">
+        <label class="switch" title="Turn live analysis on or off">
+          <input type="checkbox" id="engine-on" checked><span></span>
+        </label>
+        <select id="engine-select" title="Active engine"></select>
+        <span class="engine-depth" id="engine-depth"></span>
+      </div>
+      <div class="no-engine" id="no-engine" hidden>
+        <p>No engine installed yet.</p>
+        <button class="btn primary" id="quick-install">Install Stockfish</button>
+        <button class="btn" id="quick-import">Add engine from file…</button>
+        <div class="progress" id="quick-progress" hidden><div></div><span></span></div>
+      </div>
+      <div class="modebar" id="playbar" hidden>
+        <span id="play-status"></span>
+        <span class="spacer"></span>
+        <button class="btn" id="play-takeback">Take back</button>
+        <button class="btn danger" id="play-resign">Resign</button>
+      </div>
+      <div class="retry" id="retry" hidden>
+        <div id="retry-text"></div>
+        <div class="row">
+          <button class="btn" id="retry-hint">Hint</button>
+          <button class="btn" id="retry-answer">Show answer</button>
+          <button class="btn primary" id="retry-next">Next</button>
+          <span class="spacer"></span>
+          <button class="btn" id="retry-exit">Exit</button>
+        </div>
+      </div>
+      <div class="lines" id="lines"></div>
+      <div class="opening" id="opening"></div>
+      <div class="book" id="book" hidden></div>
+      <div class="coach" id="coach" hidden></div>
+      <div class="moves" id="moves"></div>
+      <div class="keynav" id="keynav" hidden>
+        <button class="btn" id="key-prev" title="Previous key move (Shift+←)">◀ Key move</button>
+        <span id="key-count"></span>
+        <button class="btn" id="key-next" title="Next key move (Shift+→)">Key move ▶</button>
+      </div>
+      <div class="graph-wrap" id="graph-wrap" hidden><svg id="graph" preserveAspectRatio="none"></svg></div>
+    </div>
+
+    <div class="tab-body" id="tab-review" hidden>
+      <div id="review-idle">
+        <p class="hint">Game Review checks every move of the main line with the engine and grades it, from Brilliant to Blunder.</p>
+        <div class="row">
+          <label>Depth
+            <select id="review-depth">
+              <option value="12">Fast (12)</option>
+              <option value="16">Standard (16)</option>
+              <option value="20">Deep (20)</option>
+              <option value="24">Maximum (24)</option>
+            </select>
+          </label>
+          <button class="btn primary big" id="review-start">Start Review</button>
+        </div>
+      </div>
+      <div id="review-running" hidden>
+        <p id="review-status">Analysing…</p>
+        <div class="progress" id="review-progress"><div></div><span></span></div>
+        <button class="btn" id="review-cancel">Cancel</button>
+      </div>
+      <div id="review-result"></div>
+    </div>
+
+    <div class="tab-body" id="tab-games" hidden>
+      <h3>Paste PGN or FEN</h3>
+      <textarea id="pgn-input" spellcheck="false" placeholder="Paste a game (PGN) or a position (FEN) here"></textarea>
+      <div class="row">
+        <button class="btn primary" id="pgn-load">Load</button>
+        <button class="btn" id="pgn-file-btn">Open PGN file…</button>
+        <input type="file" id="pgn-file" accept=".pgn,.txt,text/plain" hidden>
+        <button class="btn" id="pgn-copy">Copy current PGN</button>
+        <button class="btn" id="open-editor">Set up a position…</button>
+      </div>
+      <h3>Current game</h3>
+      <div class="row">
+        <button class="btn primary" id="lib-save">Save to library</button>
+        <button class="btn" id="pgn-copy-notes">Copy PGN with grades</button>
+        <button class="btn" id="pgn-save-file">Save PGN file…</button>
+      </div>
+      <h3>Import by username</h3>
+      <div class="row">
+        <select id="site-select">
+          <option value="chesscom">Chess.com</option>
+          <option value="lichess">Lichess</option>
+        </select>
+        <input type="text" id="site-user" placeholder="Username" spellcheck="false" autocomplete="off">
+        <button class="btn primary" id="site-fetch">Fetch games</button>
+      </div>
+      <p class="status" id="games-status"></p>
+      <div class="game-list" id="game-list"></div>
+      <h3>Library</h3>
+      <div class="game-list" id="library"></div>
+    </div>
+
+    <div class="tab-body" id="tab-play" hidden>
+      <h3>Play against the engine</h3>
+      <p class="hint">Play a full game against the active engine, then get it reviewed. Engine lines and grades stay hidden until the game is over.</p>
+      <div class="form">
+        <label>You play
+          <select id="play-side">
+            <option value="w">White</option>
+            <option value="b">Black</option>
+            <option value="r">Random</option>
+          </select>
+        </label>
+        <label>Opponent strength
+          <select id="play-level"></select>
+        </label>
+      </div>
+      <div class="row"><button class="btn primary big" id="play-start">Start game</button></div>
+      <p class="status" id="play-note"></p>
+    </div>
+
+    <div class="tab-body" id="tab-engines" hidden>
+      <h3>Installed</h3>
+      <div id="installed"></div>
+      <div class="row"><button class="btn" id="import-engine">Add engine from file…</button></div>
+      <p class="status" id="engine-status"></p>
+      <h3>Download</h3>
+      <div id="catalog"></div>
+      <h3>Engine settings</h3>
+      <div class="form">
+        <label>Threads <input type="number" id="set-threads" min="1"></label>
+        <label>Memory (MB) <input type="number" id="set-hash" min="16" step="16"></label>
+        <label>Lines <input type="number" id="set-multipv" min="1" max="5"></label>
+        <label>Live depth <input type="number" id="set-livedepth" min="8" max="60"></label>
+      </div>
+      <details id="advanced">
+        <summary>Advanced options for the active engine</summary>
+        <div class="form adv" id="advanced-body"></div>
+      </details>
+    </div>
+
+    <div class="tab-body" id="tab-settings" hidden>
+      <h3>Board</h3>
+      <div class="swatches" id="board-themes"></div>
+      <h3>Pieces</h3>
+      <div class="swatches" id="piece-sets"></div>
+      <h3>Display</h3>
+      <label class="check"><input type="checkbox" id="set-coords"> Coordinates</label>
+      <label class="check"><input type="checkbox" id="set-arrow"> Best-move arrow</label>
+      <label class="check"><input type="checkbox" id="set-legal"> Legal-move dots</label>
+      <label class="check"><input type="checkbox" id="set-anim"> Animate piece moves</label>
+      <label class="check"><input type="checkbox" id="set-sound"> Sounds</label>
+      <label class="check"><input type="checkbox" id="set-book"> Show book moves for the position</label>
+      <h3>Move quality</h3>
+      <label class="check"><input type="checkbox" id="set-auto"> Grade moves automatically (as you play, and when a game is loaded)</label>
+      <p class="hint small">Piece sets and opening names come from the Lichess project under open licenses. See <code>ui/pieces/LICENSES.md</code>.</p>
+    </div>
+
+    <footer class="controls">
+      <button id="nav-start" title="Start (Home)">⏮</button>
+      <button id="nav-prev" title="Back (←)">◀</button>
+      <button id="nav-next" title="Forward (→)">▶</button>
+      <button id="nav-end" title="End (End)">⏭</button>
+      <span class="spacer"></span>
+      <button id="nav-flip" title="Flip board (F)">⇅</button>
+      <button id="nav-delete" title="Delete this move and everything after it">✂</button>
+      <button id="nav-new" title="New board">＋</button>
+    </footer>
+  </section>
+</div>
+<div class="welcome" id="welcome" hidden>
+  <div class="welcome-box">
+    <h2>Welcome to Chesslens</h2>
+    <p>To analyse games you need a chess engine. One click installs the strongest one.</p>
+    <button class="btn primary big" data-install="stockfish" id="welcome-main">Install Stockfish</button>
+    <div class="progress" id="welcome-progress" hidden><div></div><span></span></div>
+    <p class="status err" id="welcome-error"></p>
+    <p class="hint">Or pick a different engine:</p>
+    <div class="row centre" id="welcome-others"></div>
+    <div class="row centre">
+      <button class="btn" id="welcome-file">Use an engine file I already have…</button>
+      <button class="btn" id="welcome-skip">Skip for now</button>
+    </div>
+  </div>
+</div>
+<div class="welcome" id="editor" hidden>
+  <div class="welcome-box editor-box">
+    <h2>Set up a position</h2>
+    <div class="editor-main">
+      <div class="editor-board" id="editor-board"></div>
+      <div class="editor-side">
+        <div class="palette" id="editor-palette"></div>
+        <label>Side to move
+          <select id="editor-turn"><option value="w">White</option><option value="b">Black</option></select>
+        </label>
+        <div class="castle">
+          <label class="check"><input type="checkbox" data-castle="K" checked> White O-O</label>
+          <label class="check"><input type="checkbox" data-castle="Q" checked> White O-O-O</label>
+          <label class="check"><input type="checkbox" data-castle="k" checked> Black O-O</label>
+          <label class="check"><input type="checkbox" data-castle="q" checked> Black O-O-O</label>
+        </div>
+        <button class="btn" id="editor-start">Starting position</button>
+        <button class="btn" id="editor-clear">Clear board</button>
+      </div>
+    </div>
+    <p class="status" id="editor-fen"></p>
+    <div class="row centre">
+      <button class="btn primary" id="editor-ok">Analyse this position</button>
+      <button class="btn" id="editor-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast" hidden></div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

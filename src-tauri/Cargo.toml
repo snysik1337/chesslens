@@ -1,0 +1,26 @@
+[package]
+name = "chesslens"
+version = "0.1.0"
+edition = "2021"
+description = "Chess analysis board with one-click engine installs and game review"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "2"
+tar = "0.4"
+flate2 = "1"
+
+[features]
+# Plain `cargo build --release` embeds the UI, no Tauri CLI needed.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+opt-level = 2
+strip = true
