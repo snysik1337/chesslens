@@ -52,8 +52,44 @@ const SOUNDS = {
   right: () => { note(523, 0.35, { gain: 0.05 }); note(659, 0.5, { gain: 0.05, at: 0.12 }); },
   wrong: () => { note(196, 0.3, { gain: 0.06, drop: 0.12 }); },
 };
+// Recorded board sounds (see ui/sounds/LICENSES.md). Castling plays the move sound twice.
+const SAMPLE_FILES = { move: 'Move', capture: 'Capture', check: 'Check', end: 'GenericNotify' };
+const samples = {};
+let style = 'wood';   // 'wood' = recorded sounds, 'soft' = generated tones
+
+export function setSoundStyle(s) { style = s; }
+
+/** Loads and decodes the recorded sounds. Returns how many are ready. */
+export async function preloadSounds() {
+  try {
+    const c = out();
+    await Promise.all(Object.entries(SAMPLE_FILES).map(async ([name, file]) => {
+      if (samples[name]) return;
+      const data = await (await fetch(`sounds/${file}.ogg`)).arrayBuffer();
+      samples[name] = await new Promise((ok, fail) => c.decodeAudioData(data, ok, fail));
+    }));
+  } catch { /* missing decoder or no audio device: the generated tones are used instead */ }
+  return Object.keys(samples).length;
+}
+
+function sample(name, at = 0) {
+  const buf = samples[name];
+  if (!buf) return false;
+  const c = out(), src = c.createBufferSource();
+  src.buffer = buf;
+  src.connect(master);
+  src.start(c.currentTime + at);
+  return true;
+}
+
 export function playSound(name) {
-  try { SOUNDS[name]?.(); } catch { /* no audio device */ }
+  try {
+    if (style === 'wood') {
+      if (name === 'castle' && sample('move') && sample('move', 0.14)) return;
+      if (sample(name)) return;
+    }
+    SOUNDS[name]?.();
+  } catch { /* no audio device */ }
 }
 export function soundForMove(mv, terminal) {
   if (terminal) return 'end';

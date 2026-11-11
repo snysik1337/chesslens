@@ -264,5 +264,8 @@ export async function runTests(app) {
     ok(c.moves[0] === a.moves[0], 'earlier grade changed');
   });
 
+  const decoded = await app.preloadSounds();
+  test('the four recorded sounds load and decode', () => eq(decoded, 4));
+
   return { count, failures };
 }
