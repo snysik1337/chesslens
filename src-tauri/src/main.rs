@@ -21,6 +21,7 @@ use engines::{EngineInfo, Registry};
 const USER_AGENT: &str = "Chesslens/0.1 (desktop chess analysis app)";
 
 struct Running {
+    id: String,
     child: Child,
     stdin: ChildStdin,
 }
@@ -99,7 +100,10 @@ fn save_text_file(app: AppHandle, name: String, contents: String) -> Result<Opti
 
 #[tauri::command(async)]
 fn remove_engine(app: AppHandle, state: State<EngineState>, id: String) -> Result<(), String> {
-    kill_running(&state);
+    let is_running = state.running.lock().unwrap().as_ref().is_some_and(|r| r.id == id);
+    if is_running {
+        kill_running(&state);
+    }
     registry(&app)?.remove(&id)
 }
 
@@ -137,7 +141,7 @@ fn engine_start(app: AppHandle, state: State<EngineState>, id: String) -> Result
     let stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let gen = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
-    *state.running.lock().unwrap() = Some(Running { child, stdin });
+    *state.running.lock().unwrap() = Some(Running { id, child, stdin });
 
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);

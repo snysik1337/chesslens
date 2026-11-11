@@ -34,7 +34,7 @@ export class Board {
     el.addEventListener('pointerdown', (e) => this.down(e));
     el.addEventListener('pointermove', (e) => this.move(e));
     el.addEventListener('pointerup', (e) => this.up(e));
-    el.addEventListener('pointercancel', () => this.endDrag());
+    el.addEventListener('pointercancel', () => { this.endDrag(); this.render(); });
     this.render();
   }
 

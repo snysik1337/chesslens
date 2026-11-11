@@ -102,7 +102,7 @@ function loadPgn(text, { userName } = {}) {
   }
   renderAll();
   analyze();
-  if (settings.autoReview && engine.ready && history.length && !batch) cancelReview().then(() => runReview());
+  if (settings.autoReview && settings.engineOn && engine.ready && history.length && !batch) cancelReview().then(() => runReview());
 }
 
 /** Adds a move at the current position (or follows it if it already exists). */
@@ -411,6 +411,7 @@ function renderLive() {
     $('engine-depth').textContent = '';
   } else if (!live.lines.length) {
     el.innerHTML = `${threatRow(node)}<div class="msg">Thinking…</div>`;
+    $('engine-depth').textContent = '';
   } else {
     const [, turn, , , , full] = node.fen.split(' ');
     el.innerHTML = threatRow(node) + live.lines.slice(0, settings.multipv).map((l, i) => {
@@ -1142,6 +1143,7 @@ async function startPlay() {
     Event: 'Chesslens game', Date: new Date().toISOString().slice(0, 10).replace(/-/g, '.'),
     White: color === 'w' ? 'You' : opp, Black: color === 'w' ? opp : 'You', Result: '*',
   });
+  if (playStopping) await playStopping;
   const limit = engine.options.find((o) => o.name === 'UCI_LimitStrength');
   const elo = engine.options.find((o) => o.name === 'UCI_Elo');
   play = { color, level, thinking: false, byElo: !!(limit && elo && level.elo) };
@@ -1176,20 +1178,20 @@ function gameOver() {
   return null;
 }
 
-async function endPlay(result, text) {
+async function endPlay(result, text, { quiet = false } = {}) {
   game.headers.Result = result;
   await stopPlay();
-  if (settings.sound) playSound('end');
+  if (settings.sound && !quiet) playSound('end');   // a mating move has already played it
   toast(`${text} ${result.replace('1/2-1/2', '½-½')}`);
   renderAll();
   analyze();
-  if (settings.autoReview && mainline().length) runReview();
+  if (settings.autoReview && settings.engineOn && mainline().length) runReview();
 }
 
 function finishIfOver() {
   const over = gameOver();
   if (!over) return false;
-  endPlay(over.terminal === 'checkmate' ? (over.score.winner === 'w' ? '1-0' : '0-1') : '1/2-1/2', `${over.text}.`);
+  endPlay(over.terminal === 'checkmate' ? (over.score.winner === 'w' ? '1-0' : '0-1') : '1/2-1/2', `${over.text}.`, { quiet: !!terminalInfo(game.current.fen) });
   return true;
 }
 
@@ -1264,7 +1266,8 @@ function renderModes() {
 
 // ---------------------------------------------------------------- layout
 function applyLayout() {
-  document.documentElement.style.setProperty('--panel-w', `${settings.panelW}px`);
+  // Never wider than the window allows, so a width chosen on a big screen cannot crush the board.
+  document.documentElement.style.setProperty('--panel-w', `max(320px, min(${settings.panelW}px, calc(100vw - 480px)))`);
 }
 function toggleFocus() {
   const on = $('app').classList.toggle('focus');
@@ -1623,12 +1626,16 @@ function saveToLibrary() {
   const n = mainline().length;
   if (!n) { toast('There is no game to save yet.'); return; }
   const h = game.headers;
-  const list = loadLibrary();
+  const line = mainline().map((m) => m.move.san).join(' ');
+  const white = h.White || 'White', black = h.Black || 'Black';
+  const before = loadLibrary();
+  const list = before.filter((g) => !(g.line === line && g.white === white && g.black === black));
+  const replaced = list.length < before.length;
   list.unshift({
-    id: Date.now(), date: new Date().toISOString(), white: h.White || 'White', black: h.Black || 'Black',
+    line, id: Date.now(), date: new Date().toISOString(), white, black,
     result: h.Result || '*', acc: game.review ? game.review.accuracy : null, moves: Math.ceil(n / 2), pgn: toPgn({ annotate: true }),
   });
-  if (storeLibrary(list.slice(0, 300))) { renderLibrary(); toast('Saved to the library.'); }
+  if (storeLibrary(list.slice(0, 300))) { renderLibrary(); toast(replaced ? 'Library entry updated.' : 'Saved to the library.'); }
 }
 
 function renderLibrary() {
@@ -1894,6 +1901,8 @@ function wire() {
   $('nav-delete').onclick = deleteCurrent;
   $('nav-new').onclick = () => { newGame(); renderAll(); analyze(); showTab('analysis'); };
   document.addEventListener('keydown', (e) => {
+    if (!$('editor').hidden) { if (e.key === 'Escape') $('editor').hidden = true; return; }
+    if (!$('welcome').hidden) return;
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === 'Escape' && retry) exitRetry();
     else if (e.key === 'Escape' && drill) exitDrill();
@@ -1926,8 +1935,9 @@ function wire() {
     if (use) activateEngine(use);
     if (remove) {
       if (engineBusy()) { toast(`Wait until ${engineBusy()} is finished.`); return; }
+      // Stop the active engine ourselves first, so its exit is not mistaken for a crash.
+      if (remove === settings.engineId) await engine.shutdown();
       await invoke('remove_engine', { id: remove }).catch((err) => toast(String(err), true));
-      if (remove === settings.engineId) { engine.ready = false; engine.info = null; }
       await refreshEngines();
     }
   });
