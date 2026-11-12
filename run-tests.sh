@@ -4,7 +4,7 @@
 set -e
 here="$(cd "$(dirname "$0")" && pwd)"
 bin="$here/src-tauri/target/release/chesslens"
-[ -x "$bin" ] || { echo "Build first: (cd src-tauri && ~/.cargo/bin/cargo build --release)"; exit 1; }
+[ -x "$bin" ] || { echo "Build first: (cd src-tauri && cargo build --release)"; exit 1; }
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 XDG_DATA_HOME="$tmp" timeout 120 "$bin" --test

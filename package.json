@@ -1,0 +1,12 @@
+{
+  "name": "chesslens",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Chess analysis board with one-click engine installs and game review",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

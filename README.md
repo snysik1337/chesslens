@@ -15,15 +15,41 @@ Chess analysis board for Linux (Tauri + plain JavaScript).
 - Opening repertoire trainer: save lines and get quizzed on them.
 - Resizable side panel, board-only mode (B), and update notices for downloaded engines.
 
-## Build and run
+## Install
 
-    cd src-tauri && ~/.cargo/bin/cargo build --release
+### Prebuilt (recommended)
+
+    curl -fsSL https://raw.githubusercontent.com/snysik1337/chesslens/main/install.sh | sh
+
+Downloads the latest AppImage for your CPU and installs it to
+`~/.local/bin/chesslens` with an app-menu entry. No root, no compiler.
+
+To remove it:
+
+    curl -fsSL https://raw.githubusercontent.com/snysik1337/chesslens/main/install.sh | sh -s -- --uninstall
+
+The AppImage needs FUSE 2. If it will not start, install `libfuse2`
+(`libfuse2t64` on Ubuntu 24.04+), or run it with `--appimage-extract-and-run`.
+
+### Build from source
+
+    git clone https://github.com/snysik1337/chesslens
+    cd chesslens
+    ./install.sh
+
+`install.sh` installs the system packages and Rust if needed, builds the app,
+and installs it to `~/.local`. Pass `--build` to force a source build even when
+a prebuilt release exists, `--no-deps` to skip system packages, or `--prefix DIR`
+to install somewhere else.
+
+### Manual
+
+    cd src-tauri && cargo build --release
     ./target/release/chesslens
 
-`./install.sh` adds it to the app menu (per user, no sudo).
-`chesslens --selftest` exercises the app end to end (install, review, grading, play mode, username import) and prints the results. Run it with `XDG_DATA_HOME` pointing at a temporary folder, because it changes saved settings.
-
 Needs `webkit2gtk-4.1` at runtime. Engines and their list live in `~/.local/share/io.chesslens.app/`.
+
+`chesslens --selftest` exercises the app end to end (install, review, grading, play mode, username import) and prints the results. Run it with `XDG_DATA_HOME` pointing at a temporary folder, because it changes saved settings.
 
 ## Tests
 

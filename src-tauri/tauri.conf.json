@@ -23,7 +23,8 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": ["appimage", "deb"],
     "icon": ["icons/icon.png"]
   }
 }
